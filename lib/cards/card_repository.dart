@@ -1,11 +1,13 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'card_model.dart';
+import 'seed_cards.dart';
 
 class CardRepository {
   CardRepository(this._prefs);
 
   static const String _cardsKey = 'cards_v1';
+  static const String _seedPersistedKey = 'seed_persisted_v1';
 
   final SharedPreferences _prefs;
 
@@ -18,6 +20,60 @@ class CardRepository {
     } catch (_) {
       // If storage got corrupted, don't crash the app.
       return const <CardModel>[];
+    }
+  }
+
+  /// Ensures seed cards are persisted if storage is empty
+  Future<void> ensureSeed() async {
+    final existing = await load();
+    if (existing.isNotEmpty) return; // Already has cards
+
+    final seedPersisted = _prefs.getBool(_seedPersistedKey) ?? false;
+    if (seedPersisted) return; // Seed already persisted
+
+    // Persist seed cards
+    await save(seedCards);
+    await _prefs.setBool(_seedPersistedKey, true);
+  }
+
+  /// Resolves a card for a specific locale
+  /// Returns a new CardModel with question/answers/correctAnswer from translation if available
+  CardModel resolveForLocale(CardModel raw, String localeCode) {
+    // Normalize locale code (e.g., 'en_US' -> 'en')
+    final normalizedLocale = localeCode.split('_').first.toLowerCase();
+
+    if (raw.translations != null && raw.translations!.containsKey(normalizedLocale)) {
+      final translation = raw.translations![normalizedLocale]!;
+      final correctAnswer = translation.answers[translation.correctIndex];
+
+      return CardModel(
+        id: raw.id,
+        question: translation.question,
+        answers: translation.answers,
+        correctAnswer: correctAnswer,
+        category: raw.category,
+        difficulty: raw.difficulty,
+        createdAt: raw.createdAt,
+        source: raw.source,
+        translations: raw.translations, // Keep translations for future use
+      );
+    }
+
+    // Fallback to original card
+    return raw;
+  }
+
+  /// Placeholder for future server download
+  /// Called when remaining/total < 0.30
+  Future<void> maybeDownloadMoreIfLow({
+    required String localeCode,
+    required int remaining,
+    required int total,
+  }) async {
+    // TODO: Implement server download when ready
+    // This is a placeholder that does nothing for now
+    if (remaining / total < 0.30) {
+      // Would trigger download here
     }
   }
 

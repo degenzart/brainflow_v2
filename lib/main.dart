@@ -165,13 +165,49 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadCards();
+    // Reload cards when locale changes
+    widget.localeController.addListener(_onLocaleChanged);
+  }
+
+  @override
+  void dispose() {
+    widget.localeController.removeListener(_onLocaleChanged);
+    super.dispose();
+  }
+
+  void _onLocaleChanged() {
+    _loadCards();
   }
 
   Future<void> _loadCards() async {
-    final cards = await widget.repository.load();
+    // Ensure seed cards are persisted if storage is empty
+    await widget.repository.ensureSeed();
+    
+    // Load raw cards
+    final rawCards = await widget.repository.load();
     if (!mounted) return;
+    
+    // Get current locale
+    final currentLocale = widget.localeController.locale?.languageCode ?? 'en';
+    
+    // Resolve cards for current locale
+    final resolvedCards = rawCards.map((card) => 
+      widget.repository.resolveForLocale(card, currentLocale)
+    ).toList(growable: false);
+    
+    // Check if we need to download more (placeholder for future)
+    final total = resolvedCards.length;
+    final remaining = total; // In real implementation, track remaining cards
+    if (total > 0) {
+      await widget.repository.maybeDownloadMoreIfLow(
+        localeCode: currentLocale,
+        remaining: remaining,
+        total: total,
+      );
+    }
+    
     setState(() {
-      _cards = cards;
+      _cards = resolvedCards;
       _loading = false;
     });
   }
@@ -1120,11 +1156,9 @@ class _FlowViewState extends State<_FlowView> {
 
   Future<void> _goNext({int millis = 420}) async {
     if (!_controller.hasClients) return;
-    final current = (_controller.page ?? _controller.initialPage.toDouble())
-        .round()
-        .clamp(0, widget.cards.length - 1);
-    if (current >= widget.cards.length - 1) return;
-
+    if (widget.cards.isEmpty) return;
+    
+    // Endless flow: always go to next page (PageView handles wrap-around via itemCount)
     await _controller.nextPage(
       duration: Duration(milliseconds: millis),
       curve: Curves.easeInOutCubic,
@@ -1168,13 +1202,13 @@ class _FlowViewState extends State<_FlowView> {
       setState(() {
         _fireworkOrigin = origin;
       });
-      _showFeedback(_FlowFeedback.correct, millis: 520);
+      _showFeedback(_FlowFeedback.correct, millis: 800);
       HapticFeedback.lightImpact();
-      // Wait for firework animation to complete
-      await Future<void>.delayed(const Duration(milliseconds: 520));
+      // Wait for firework animation to complete (800ms)
+      await Future<void>.delayed(const Duration(milliseconds: 800));
       if (!mounted) return;
       // Additional delay before page transition for smooth overlap
-      await Future<void>.delayed(const Duration(milliseconds: 140));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
       if (!mounted) return;
       // Clear firework origin before transition
       setState(() {
@@ -1194,6 +1228,7 @@ class _FlowViewState extends State<_FlowView> {
       // Same smooth transition parameters as correct answer
       await _goNext(millis: 420);
     }
+    
 
     if (!mounted) return;
     _answerLocked = false;
@@ -1201,22 +1236,43 @@ class _FlowViewState extends State<_FlowView> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.cards.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    
+    // Use very large itemCount for endless flow
+    const maxItemCount = 10000;
+    final itemCount = math.min(widget.cards.length * 100, maxItemCount);
+    
     return PageView.builder(
       controller: _controller,
       scrollDirection: Axis.vertical,
-      itemCount: widget.cards.length,
+      itemCount: itemCount,
       onPageChanged: (i) {
+        // Handle endless flow: wrap around using modulo
+        final actualIndex = i % widget.cards.length;
         setState(() {
-          _currentIndex = i;
+          _currentIndex = actualIndex;
           _answerLocked = false;
           _feedback = _FlowFeedback.none;
           _swipeConsumed = false;
         });
+        
+        // Check if we need to download more cards (placeholder)
+        if (widget.cards.isNotEmpty) {
+          final remaining = widget.cards.length - actualIndex;
+          final total = widget.cards.length;
+          if (remaining / total < 0.30) {
+            // Would trigger server download in the future
+          }
+        }
       },
       itemBuilder: (context, index) {
-        final card = widget.cards[index];
+        // Wrap around to actual card index
+        final cardIndex = index % widget.cards.length;
+        final card = widget.cards[cardIndex];
         final style = _categoryStyle(card.category);
-        final isActive = index == _currentIndex;
+        final isActive = cardIndex == _currentIndex;
         final showWrongFlash = isActive && _feedback == _FlowFeedback.wrong;
         
         // Create a local key for this card's stack
@@ -1757,7 +1813,7 @@ class _FireworkBurstState extends State<_FireworkBurst>
     super.initState();
     _c = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 550),
+      duration: const Duration(milliseconds: 800),
     )..forward();
   }
 
@@ -1781,7 +1837,7 @@ class _FireworkBurstState extends State<_FireworkBurst>
         builder: (context, _) {
           return CustomPaint(
             painter: _FireworkPainter(
-              t: Curves.easeOut.transform(_c.value),
+              t: _c.value,
               color: widget.color,
               seed: widget.seed,
             ),
@@ -1801,106 +1857,143 @@ class _FireworkPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final paint = Paint()..style = PaintingStyle.fill;
-
-    // Gold color palette
+    
+    // Gold color palette - warm golden colors
     final goldBase = const Color(0xFFFFD700); // Gold
-    final goldLight = const Color(0xFFFFF8DC); // Cornsilk
-    final goldDark = const Color(0xFFFFA500); // Orange gold
+    final goldWarm = const Color(0xFFFFC84A); // Warm gold
+    final goldBright = const Color(0xFFFFF8DC); // Bright gold
+    final whiteGold = const Color(0xFFFFFEF0); // White with gold tint
 
-    const particles = 50; // More particles for full screen
-    final baseAngle = -math.pi / 2; // Upward direction
-    final spread = 0.85 * math.pi; // Very wide spread for full screen
-    final maxSpeed = size.shortestSide * 0.7; // Much larger speed for full screen coverage
-    final gravity = 180.0; // More gravity for larger range
+    // Phase detection
+    final phase1 = t < 0.25; // 0-25%: Flash & explosive burst
+    final phase2 = t >= 0.25 && t < 0.75; // 25-75%: Flitter spreads
+    final phase3 = t >= 0.75; // 75-100%: Fade out
 
-    for (var i = 0; i < particles; i++) {
-      // Deterministic random per particle
-      final r = math.Random(seed ^ (i * 0x9E3779B9));
+    // Phase 1: Bright core flash (white → gold)
+    if (phase1) {
+      final flashProgress = t / 0.25;
+      final flashAlpha = (1 - flashProgress * 2.5).clamp(0.0, 1.0);
+      final flashPaint = Paint()
+        ..color = Colors.white.withValues(alpha: flashAlpha * 0.95)
+        ..style = PaintingStyle.fill;
+      final flashRadius = 6.0 * (1 - flashProgress);
+      canvas.drawCircle(center, flashRadius, flashPaint);
       
-      // Angle: centered upward with spread and jitter
-      final angleOffset = (r.nextDouble() - 0.5) * spread;
-      final jitter = (r.nextDouble() - 0.5) * 0.18;
-      final angle = baseAngle + angleOffset + jitter;
-      
-      // Speed variation
-      final speed = maxSpeed * (0.65 + r.nextDouble() * 0.35);
-      
-      // Ballistic movement with gravity
-      final vx = math.cos(angle) * speed;
-      final vy = math.sin(angle) * speed;
-      final x = vx * t;
-      final y = vy * t + 0.5 * gravity * t * t; // Gravity pulls down
-      
-      // Additional jitter for chaos
-      final jitterX = (r.nextDouble() - 0.5) * 20.0 * t;
-      final jitterY = (r.nextDouble() - 0.5) * 20.0 * t;
-      
-      final pos = center + Offset(x + jitterX, y + jitterY);
-      
-      // Particle size: start larger, shrink slightly
-      final startRadius = 3.5 + r.nextDouble() * 2.0;
-      final endRadius = 2.0 + r.nextDouble() * 1.5;
-      final radius = startRadius + (endRadius - startRadius) * t;
-      
-      // Gold color gradient: dark gold -> light gold -> white
-      final colorProgress = t.clamp(0.0, 1.0);
-      Color particleColor;
-      if (colorProgress < 0.5) {
-        // First half: dark gold to light gold
-        particleColor = Color.lerp(
-          goldDark,
-          goldBase,
-          colorProgress * 2.0,
-        )!;
-      } else {
-        // Second half: gold to white
-        particleColor = Color.lerp(
-          goldBase,
-          goldLight,
-          (colorProgress - 0.5) * 2.0,
-        )!;
-      }
-      
-      // Alpha: fast fade out
-      final alpha = (1 - t * t * 1.2).clamp(0.0, 1.0);
-      paint.color = particleColor.withValues(alpha: alpha);
-      
-      canvas.drawCircle(pos, radius, paint);
+      // Transition to gold
+      final goldFlashPaint = Paint()
+        ..color = goldBase.withValues(alpha: flashAlpha * 0.8)
+        ..style = PaintingStyle.fill;
+      canvas.drawCircle(center, flashRadius * 0.7, goldFlashPaint);
     }
 
-    // Center flash: bright gold initial burst
-    final centerAlpha = (1 - t * 1.5).clamp(0.0, 1.0);
-    paint.color = goldBase.withValues(alpha: centerAlpha);
-    final centerRadius = 6.0 * (1 - t) + 3.0;
-    canvas.drawCircle(center, centerRadius, paint);
+    // Many golden flitter particles - like confetti (single explosion)
+    const flitterCount = 338; // 260 * 1.3 (another 30% increase)
+    final maxDist = size.shortestSide * 0.65;
+    final baseAngle = -math.pi / 2; // Upward direction
+    final spread = 0.95 * math.pi; // Very wide spread, biased upward
 
-    // Gold sparkles: small bright golden particles that appear later
-    if (t > 0.35) {
-      final sparkleCount = 20; // Many more sparkles for full screen
-      final sparkleAlpha = ((t - 0.35) / 0.65).clamp(0.0, 1.0);
-      final sparkleFade = (1 - (t - 0.35) / 0.65).clamp(0.0, 1.0);
+    final particlePaint = Paint()
+      ..style = PaintingStyle.fill;
+
+    for (var i = 0; i < flitterCount; i++) {
+      final r = math.Random(seed ^ (i * 0x9E3779B9));
       
-      for (var i = 0; i < sparkleCount; i++) {
-        final r = math.Random(seed ^ (i * 0x5E3779B9) ^ 0x12345678);
-        final sparkleAngle = r.nextDouble() * math.pi * 2;
-        final sparkleDist = size.shortestSide * 0.3 + r.nextDouble() * size.shortestSide * 0.4; // Much larger range
-        final sparklePos = center + Offset(
-          math.cos(sparkleAngle) * sparkleDist * t,
-          math.sin(sparkleAngle) * sparkleDist * t,
-        );
-        
-        // Gold sparkles with variation
-        final sparkleGold = Color.lerp(
-          goldBase,
-          goldLight,
-          r.nextDouble(),
-        )!;
-        paint.color = sparkleGold.withValues(
-          alpha: sparkleAlpha * sparkleFade * 0.95,
-        );
-        canvas.drawCircle(sparklePos, 2.5 + r.nextDouble() * 2.0, paint);
+      // Angle: biased upward with symmetric left-right distribution
+      // Ensure equal distribution left and right of center
+      final randomValue = r.nextDouble();
+      
+      // Symmetric horizontal distribution: -1 to 1, centered at 0
+      final horizontalFactor = (randomValue - 0.5) * 2.0; // -1.0 to 1.0
+      
+      // Upward bias: -0.25 to 0.25 (biased upward)
+      final upwardBias = -0.25 + r.nextDouble() * 0.5; // -0.25 to 0.25
+      
+      // Combine: upward bias + symmetric horizontal spread
+      final angleOffset = upwardBias * spread + horizontalFactor * spread * 0.5;
+      final jitter = (r.nextDouble() - 0.5) * 0.3;
+      final angle = baseAngle + angleOffset + jitter;
+      
+      // Speed variation - different particles move at different speeds
+      final speedMultiplier = 0.5 + r.nextDouble() * 0.6;
+      final speed = maxDist * speedMultiplier;
+      
+      // Time-based position - faster acceleration outward, all particles start at t=0
+      double progress;
+      if (phase1) {
+        // Explosive burst - fast start
+        final phase1Progress = t / 0.25;
+        progress = Curves.easeOutCubic.transform(phase1Progress) * 0.4;
+      } else if (phase2) {
+        // Spread out - accelerate faster outward (quadratic acceleration)
+        final phase2Progress = (t - 0.25) / 0.5;
+        // Quadratic curve for faster acceleration: progress^2
+        final acceleratedProgress = phase2Progress * phase2Progress;
+        progress = 0.4 + acceleratedProgress * 0.55;
+      } else {
+        // Fade out - continue fast outward
+        final phase3Progress = (t - 0.75) / 0.25;
+        // Continue with fast progress
+        progress = 0.95 + phase3Progress * 0.05;
       }
+      
+      final dist = speed * progress;
+      
+      // Ballistic movement with gravity
+      final vx = math.cos(angle) * dist;
+      final vy = math.sin(angle) * dist;
+      final gravityY = 0.5 * 100.0 * progress * progress;
+      
+      // Additional jitter for chaos
+      final jitterX = (r.nextDouble() - 0.5) * 12.0 * progress;
+      final jitterY = (r.nextDouble() - 0.5) * 12.0 * progress;
+      
+      final pos = center + Offset(
+        vx + jitterX,
+        vy + gravityY + jitterY,
+      );
+      
+      // Particle size: varies from very small to medium (flitter sizes)
+      // Mix of small sparkles and larger particles (30% larger for more mass)
+      final sizeVariation = r.nextDouble();
+      final particleSize = sizeVariation < 0.6 
+          ? (0.8 + sizeVariation * 1.2) * 1.3  // 60% small sparkles (1.04-2.6px, 30% larger)
+          : (1.5 + (sizeVariation - 0.6) * 8.75) * 1.3; // 40% larger particles (1.95-6.5px, 30% larger)
+      
+      // Color variation: warm gold → bright gold → white-gold
+      Color particleColor;
+      final colorVariation = r.nextDouble();
+      if (colorVariation < 0.35) {
+        // 35% warm gold
+        particleColor = goldWarm;
+      } else if (colorVariation < 0.65) {
+        // 30% base gold
+        particleColor = goldBase;
+      } else if (colorVariation < 0.85) {
+        // 20% bright gold
+        particleColor = goldBright;
+      } else {
+        // 15% white-gold (more sparkles)
+        particleColor = whiteGold;
+      }
+      
+      // Alpha: fade out in phase 3, slight variation
+      double alpha;
+      if (phase3) {
+        final fadeProgress = (t - 0.75) / 0.25;
+        alpha = (1 - fadeProgress * fadeProgress).clamp(0.0, 1.0);
+      } else {
+        // Slight fade based on distance
+        alpha = 1.0 - progress * 0.2;
+      }
+      
+      // Add some brightness variation
+      final brightnessVariation = 0.85 + r.nextDouble() * 0.15;
+      alpha *= brightnessVariation;
+      
+      particlePaint.color = particleColor.withValues(alpha: alpha.clamp(0.0, 1.0));
+      
+      // Draw particle as circle
+      canvas.drawCircle(pos, particleSize, particlePaint);
     }
   }
 
