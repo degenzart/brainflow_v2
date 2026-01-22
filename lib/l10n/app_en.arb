@@ -1,0 +1,30 @@
+{
+  "drawer_flow": "FLOW",
+  "drawer_sprint": "SPRINT",
+  "drawer_run": "RUN",
+  "drawer_progress": "PROGRESS",
+
+  "menu_account": "Account",
+  "menu_settings": "Settings",
+  "menu_language": "Language",
+
+  "import_title": "Online import",
+  "import_subtitle": "Open Trivia DB (25 questions)",
+  "import_running": "Import running…",
+  "import_done": "Import done: {count} new cards.",
+  "@import_done": {
+    "description": "Shown after import finished.",
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+
+  "no_cards_loaded": "No cards loaded yet.",
+
+  "report_title": "Report",
+  "report_too_hard": "Too hard",
+  "report_too_easy": "Too easy",
+  "report_wrong_unclear": "Wrong / unclear"
+}
