@@ -45,4 +45,4 @@ app.*.map.json
 /android/app/release
 “lib/translation/”
 “translation-worker/”
-“n#
+“n#translation-worker/
