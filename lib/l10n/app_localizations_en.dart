@@ -57,4 +57,70 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get report_wrong_unclear => 'Wrong / unclear';
+
+  @override
+  String get settings_section_general => 'General';
+
+  @override
+  String get settings_haptics => 'Haptics';
+
+  @override
+  String get settings_sound => 'Sound';
+
+  @override
+  String get settings_section_data => 'Data';
+
+  @override
+  String get settings_reload_cards => 'Reload cards';
+
+  @override
+  String get settings_import_25 => 'Import: 25 cards';
+
+  @override
+  String get settings_reset_local => 'Reset (local)';
+
+  @override
+  String get settings_section_legal => 'Legal';
+
+  @override
+  String get settings_privacy => 'Privacy';
+
+  @override
+  String get settings_imprint => 'Imprint';
+
+  @override
+  String get settings_section_info => 'Info';
+
+  @override
+  String get settings_about => 'About Brainflow';
+
+  @override
+  String get progress_training_title => 'Training';
+
+  @override
+  String get progress_difficulty => 'Difficulty';
+
+  @override
+  String get progress_select_categories => 'Select categories';
+
+  @override
+  String get account_title => 'Account';
+
+  @override
+  String get account_section_profile => 'Profile';
+
+  @override
+  String get account_edit_profile => 'Edit profile';
+
+  @override
+  String get account_sign_in => 'Sign in';
+
+  @override
+  String get account_section_subscription => 'Subscription';
+
+  @override
+  String get account_manage_subscription => 'Manage subscription';
+
+  @override
+  String get account_restore_purchases => 'Restore purchases';
 }

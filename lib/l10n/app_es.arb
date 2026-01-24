@@ -27,4 +27,28 @@
   "report_too_hard": "Demasiado difícil",
   "report_too_easy": "Demasiado fácil",
   "report_wrong_unclear": "Incorrecto / poco claro"
+  ,
+  "settings_section_general": "General",
+  "settings_haptics": "Háptica",
+  "settings_sound": "Sonido",
+  "settings_section_data": "Datos",
+  "settings_reload_cards": "Recargar tarjetas",
+  "settings_import_25": "Importar: 25 tarjetas",
+  "settings_reset_local": "Restablecer (local)",
+  "settings_section_legal": "Legal",
+  "settings_privacy": "Privacidad",
+  "settings_imprint": "Aviso legal",
+  "settings_section_info": "Info",
+  "settings_about": "Acerca de Brainflow"
+  ,
+  "progress_training_title": "Entrenamiento",
+  "progress_difficulty": "Dificultad",
+  "progress_select_categories": "Seleccionar categorías",
+  "account_title": "Cuenta",
+  "account_section_profile": "Perfil",
+  "account_edit_profile": "Editar perfil",
+  "account_sign_in": "Iniciar sesión",
+  "account_section_subscription": "Suscripción",
+  "account_manage_subscription": "Administrar suscripción",
+  "account_restore_purchases": "Restaurar compras"
 }

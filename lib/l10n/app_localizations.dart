@@ -195,6 +195,138 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Wrong / unclear'**
   String get report_wrong_unclear;
+
+  /// No description provided for @settings_section_general.
+  ///
+  /// In en, this message translates to:
+  /// **'General'**
+  String get settings_section_general;
+
+  /// No description provided for @settings_haptics.
+  ///
+  /// In en, this message translates to:
+  /// **'Haptics'**
+  String get settings_haptics;
+
+  /// No description provided for @settings_sound.
+  ///
+  /// In en, this message translates to:
+  /// **'Sound'**
+  String get settings_sound;
+
+  /// No description provided for @settings_section_data.
+  ///
+  /// In en, this message translates to:
+  /// **'Data'**
+  String get settings_section_data;
+
+  /// No description provided for @settings_reload_cards.
+  ///
+  /// In en, this message translates to:
+  /// **'Reload cards'**
+  String get settings_reload_cards;
+
+  /// No description provided for @settings_import_25.
+  ///
+  /// In en, this message translates to:
+  /// **'Import: 25 cards'**
+  String get settings_import_25;
+
+  /// No description provided for @settings_reset_local.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset (local)'**
+  String get settings_reset_local;
+
+  /// No description provided for @settings_section_legal.
+  ///
+  /// In en, this message translates to:
+  /// **'Legal'**
+  String get settings_section_legal;
+
+  /// No description provided for @settings_privacy.
+  ///
+  /// In en, this message translates to:
+  /// **'Privacy'**
+  String get settings_privacy;
+
+  /// No description provided for @settings_imprint.
+  ///
+  /// In en, this message translates to:
+  /// **'Imprint'**
+  String get settings_imprint;
+
+  /// No description provided for @settings_section_info.
+  ///
+  /// In en, this message translates to:
+  /// **'Info'**
+  String get settings_section_info;
+
+  /// No description provided for @settings_about.
+  ///
+  /// In en, this message translates to:
+  /// **'About Brainflow'**
+  String get settings_about;
+
+  /// No description provided for @progress_training_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Training'**
+  String get progress_training_title;
+
+  /// No description provided for @progress_difficulty.
+  ///
+  /// In en, this message translates to:
+  /// **'Difficulty'**
+  String get progress_difficulty;
+
+  /// No description provided for @progress_select_categories.
+  ///
+  /// In en, this message translates to:
+  /// **'Select categories'**
+  String get progress_select_categories;
+
+  /// No description provided for @account_title.
+  ///
+  /// In en, this message translates to:
+  /// **'Account'**
+  String get account_title;
+
+  /// No description provided for @account_section_profile.
+  ///
+  /// In en, this message translates to:
+  /// **'Profile'**
+  String get account_section_profile;
+
+  /// No description provided for @account_edit_profile.
+  ///
+  /// In en, this message translates to:
+  /// **'Edit profile'**
+  String get account_edit_profile;
+
+  /// No description provided for @account_sign_in.
+  ///
+  /// In en, this message translates to:
+  /// **'Sign in'**
+  String get account_sign_in;
+
+  /// No description provided for @account_section_subscription.
+  ///
+  /// In en, this message translates to:
+  /// **'Subscription'**
+  String get account_section_subscription;
+
+  /// No description provided for @account_manage_subscription.
+  ///
+  /// In en, this message translates to:
+  /// **'Manage subscription'**
+  String get account_manage_subscription;
+
+  /// No description provided for @account_restore_purchases.
+  ///
+  /// In en, this message translates to:
+  /// **'Restore purchases'**
+  String get account_restore_purchases;
 }
 
 class _AppLocalizationsDelegate

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -83,8 +84,22 @@ class BrainflowApp extends StatelessWidget {
             colorSchemeSeed: const Color(0xFF8B5CF6),
           ),
           locale: localeController.locale,
-          localizationsDelegates: AppLocalizations.localizationsDelegates,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
           supportedLocales: AppLocalizations.supportedLocales,
+          localeResolutionCallback: (locale, supportedLocales) {
+            if (locale == null) return const Locale('en');
+            for (final supported in supportedLocales) {
+              if (supported.languageCode == locale.languageCode) {
+                return supported;
+              }
+            }
+            return const Locale('en');
+          },
           home: HomeScreen(
             repository: repository,
             localeController: localeController,
@@ -364,25 +379,25 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     const _DrawerHeader(),
                     _drawerItem(
-                      title: l10n.drawer_flow,
+                      title: 'FLOW',
                       icon: Icons.water_drop_outlined,
                       selected: _section == DrawerSection.flow,
                       onTap: () => _selectSection(DrawerSection.flow),
                     ),
                     _drawerItem(
-                      title: l10n.drawer_sprint,
+                      title: 'SPRINT',
                       icon: Icons.bolt_outlined,
                       selected: _section == DrawerSection.sprint,
                       onTap: () => _selectSection(DrawerSection.sprint),
                     ),
                     _drawerItem(
-                      title: l10n.drawer_run,
+                      title: 'RUN',
                       icon: Icons.directions_run_outlined,
                       selected: _section == DrawerSection.run,
                       onTap: () => _selectSection(DrawerSection.run),
                     ),
                     _drawerItem(
-                      title: l10n.drawer_progress,
+                      title: 'PROGRESS',
                       icon: Icons.show_chart_outlined,
                       selected: _section == DrawerSection.progress,
                       onTap: () => _selectSection(DrawerSection.progress),
@@ -535,13 +550,13 @@ class _HomeScreenState extends State<HomeScreen> {
 String _sectionTitle(AppLocalizations l10n, DrawerSection section) {
   switch (section) {
     case DrawerSection.flow:
-      return l10n.drawer_flow;
+      return 'FLOW';
     case DrawerSection.sprint:
-      return l10n.drawer_sprint;
+      return 'SPRINT';
     case DrawerSection.run:
-      return l10n.drawer_run;
+      return 'RUN';
     case DrawerSection.progress:
-      return l10n.drawer_progress;
+      return 'PROGRESS';
   }
 }
 
@@ -558,6 +573,7 @@ class _DrawerBottomButtons extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final l10n = AppLocalizations.of(context)!;
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -575,7 +591,7 @@ class _DrawerBottomButtons extends StatelessWidget {
             Expanded(
               child: _BottomButton(
                 icon: Icons.person_outline,
-                label: 'Konto',
+                label: l10n.menu_account,
                 onTap: onAccountTap,
               ),
             ),
@@ -583,7 +599,7 @@ class _DrawerBottomButtons extends StatelessWidget {
             Expanded(
               child: _BottomButton(
                 icon: Icons.settings_outlined,
-                label: 'Einstellungen',
+                label: l10n.menu_settings,
                 onTap: onSettingsTap,
               ),
             ),
@@ -789,6 +805,7 @@ class _ProgressSection extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final l10n = AppLocalizations.of(context)!;
 
     return SafeArea(
       child: Padding(
@@ -797,7 +814,7 @@ class _ProgressSection extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              'Training',
+              l10n.progress_training_title,
               style: theme.textTheme.headlineSmall?.copyWith(
                 fontWeight: FontWeight.bold,
               ),
@@ -805,7 +822,7 @@ class _ProgressSection extends StatelessWidget {
             const SizedBox(height: 24),
             ListTile(
               leading: const Icon(Icons.trending_up_outlined),
-              title: const Text('Schwierigkeit'),
+              title: Text(l10n.progress_difficulty),
               subtitle: Text(difficulty),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
@@ -823,7 +840,7 @@ class _ProgressSection extends StatelessWidget {
             ),
             ListTile(
               leading: const Icon(Icons.category_outlined),
-              title: const Text('Kategorien auswählen'),
+              title: Text(l10n.progress_select_categories),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -845,6 +862,7 @@ class _AccountScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final l10n = AppLocalizations.of(context)!;
 
     return Container(
       constraints: BoxConstraints(
@@ -872,7 +890,7 @@ class _AccountScreen extends StatelessWidget {
               child: Row(
                 children: [
                   Text(
-                    'Konto',
+                    l10n.account_title,
                     style: theme.textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.bold,
                     ),
@@ -890,10 +908,10 @@ class _AccountScreen extends StatelessWidget {
                 shrinkWrap: true,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 children: [
-          _SectionHeader(title: 'Profil'),
+          _SectionHeader(title: l10n.account_section_profile),
           ListTile(
             leading: const Icon(Icons.edit_outlined),
-            title: const Text('Profil bearbeiten'),
+            title: Text(l10n.account_edit_profile),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -903,7 +921,7 @@ class _AccountScreen extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.login_outlined),
-            title: const Text('Anmeldung'),
+            title: Text(l10n.account_sign_in),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -912,10 +930,10 @@ class _AccountScreen extends StatelessWidget {
             },
           ),
           const Divider(height: 32),
-          _SectionHeader(title: 'Abo'),
+          _SectionHeader(title: l10n.account_section_subscription),
           ListTile(
             leading: const Icon(Icons.card_membership_outlined),
-            title: const Text('Abo verwalten'),
+            title: Text(l10n.account_manage_subscription),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -925,7 +943,7 @@ class _AccountScreen extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.restore_outlined),
-            title: const Text('Käufe wiederherstellen'),
+            title: Text(l10n.account_restore_purchases),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -934,10 +952,10 @@ class _AccountScreen extends StatelessWidget {
             },
           ),
           const Divider(height: 32),
-          _SectionHeader(title: 'Info'),
+          _SectionHeader(title: l10n.settings_section_info),
           ListTile(
             leading: const Icon(Icons.info_outline),
-            title: const Text('Über Brainflow'),
+            title: Text(l10n.settings_about),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -979,6 +997,7 @@ class _SettingsScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final l10n = AppLocalizations.of(context)!;
 
     return Container(
       constraints: BoxConstraints(
@@ -1006,7 +1025,7 @@ class _SettingsScreen extends StatelessWidget {
               child: Row(
                 children: [
                   Text(
-                    'Einstellungen',
+                    l10n.menu_settings,
                     style: theme.textTheme.headlineSmall?.copyWith(
                       fontWeight: FontWeight.bold,
                     ),
@@ -1024,10 +1043,10 @@ class _SettingsScreen extends StatelessWidget {
                 shrinkWrap: true,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 children: [
-                  _SectionHeader(title: 'Allgemein'),
+                  _SectionHeader(title: l10n.settings_section_general),
           ListTile(
             leading: const Icon(Icons.language_outlined),
-            title: const Text('Sprache'),
+            title: Text(l10n.menu_language),
             trailing: const Icon(Icons.chevron_right),
             onTap: () async {
               await onLanguageTap();
@@ -1035,35 +1054,38 @@ class _SettingsScreen extends StatelessWidget {
           ),
           SwitchListTile(
             secondary: const Icon(Icons.vibration_outlined),
-            title: const Text('Haptik'),
+            title: Text(l10n.settings_haptics),
             value: hapticsEnabled,
             onChanged: onHapticsChanged,
           ),
           SwitchListTile(
             secondary: const Icon(Icons.volume_up_outlined),
-            title: const Text('Sound'),
+            title: Text(l10n.settings_sound),
             value: soundEnabled,
             onChanged: onSoundChanged,
           ),
           const Divider(height: 32),
-          _SectionHeader(title: 'Daten'),
+          _SectionHeader(title: l10n.settings_section_data),
           ListTile(
             leading: const Icon(Icons.refresh_outlined),
-            title: const Text('Karten neu laden'),
+            title: Text(l10n.settings_reload_cards),
             onTap: () async {
               await onReloadCards();
             },
           ),
           ListTile(
             leading: const Icon(Icons.cloud_download_outlined),
-            title: const Text('Import: 25 Karten'),
+            title: Text(l10n.settings_import_25),
             onTap: () async {
               await onImportCards();
             },
           ),
           ListTile(
             leading: const Icon(Icons.delete_outline, color: Colors.red),
-            title: const Text('Reset (lokal)', style: TextStyle(color: Colors.red)),
+            title: Text(
+              l10n.settings_reset_local,
+              style: const TextStyle(color: Colors.red),
+            ),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('TODO: Confirm Dialog')),
@@ -1071,10 +1093,10 @@ class _SettingsScreen extends StatelessWidget {
             },
           ),
           const Divider(height: 32),
-          _SectionHeader(title: 'Rechtliches'),
+          _SectionHeader(title: l10n.settings_section_legal),
           ListTile(
             leading: const Icon(Icons.privacy_tip_outlined),
-            title: const Text('Datenschutz'),
+            title: Text(l10n.settings_privacy),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -1084,7 +1106,7 @@ class _SettingsScreen extends StatelessWidget {
           ),
           ListTile(
             leading: const Icon(Icons.description_outlined),
-            title: const Text('Impressum'),
+            title: Text(l10n.settings_imprint),
             trailing: const Icon(Icons.chevron_right),
             onTap: () {
               ScaffoldMessenger.of(context).showSnackBar(
