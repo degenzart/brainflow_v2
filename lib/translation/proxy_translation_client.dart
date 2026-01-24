@@ -1,37 +1,20 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:shared_preferences/shared_preferences.dart';
-
 import 'translation_client.dart';
 
+/// Minimal proxy client: always calls a fixed Worker base URL.
+///
+/// - No SharedPreferences
+/// - No flags/settings
+/// - No caching/retries
+/// - Errors throw (callsite already catches)
 class ProxyTranslationClient implements TranslationClient {
-  ProxyTranslationClient(this._prefs);
+  ProxyTranslationClient({required Uri baseUrl}) : _baseUrl = baseUrl;
 
-  static const String proxyBaseUrlKey = 'translation_proxy_base_url';
-  static const String proxyClientKeyKey = 'translation_proxy_client_key';
-  static const String defaultBaseUrl = 'http://localhost:8787';
+  final Uri _baseUrl;
 
-  final SharedPreferences _prefs;
-
-  Uri _translateUri() {
-    final raw = (_prefs.getString(proxyBaseUrlKey) ?? defaultBaseUrl).trim();
-    final base = Uri.parse(raw);
-    // Handles both http://host:port and http://host:port/some/base/path/
-    return base.resolve('translate');
-  }
-
-  Uri _translateBatchUri() {
-    final raw = (_prefs.getString(proxyBaseUrlKey) ?? defaultBaseUrl).trim();
-    final base = Uri.parse(raw);
-    return base.resolve('translateBatch');
-  }
-
-  void _applyOptionalClientKey(HttpClientRequest req) {
-    final clientKey = (_prefs.getString(proxyClientKeyKey) ?? '').trim();
-    if (clientKey.isEmpty) return;
-    req.headers.set('X-Client-Key', clientKey);
-  }
+  Uri _translateBatchUri() => _baseUrl.resolve('/translateBatch');
 
   @override
   Future<String> translate({
@@ -39,17 +22,8 @@ class ProxyTranslationClient implements TranslationClient {
     required String targetLang,
     String sourceLang = 'auto',
   }) async {
-    final trimmed = text.trim();
-    if (trimmed.isEmpty) return text;
-
-    // Keep single-translate available, but implement it via batch to ensure
-    // consistent behavior with the Worker.
-    final out = await translateBatch(
-      texts: <String>[text],
-      targetLang: targetLang,
-      sourceLang: sourceLang,
-    );
-    return out.isNotEmpty ? out.first : text;
+    final out = await translateBatch(texts: <String>[text], targetLang: targetLang);
+    return out.isNotEmpty ? out.first : '';
   }
 
   @override
@@ -58,11 +32,6 @@ class ProxyTranslationClient implements TranslationClient {
     required String targetLang,
     String sourceLang = 'auto',
   }) async {
-    if (texts.isEmpty) return const <String>[];
-    if (texts.length > 20) {
-      throw ArgumentError('texts must have <= 20 items');
-    }
-
     final uri = _translateBatchUri();
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 10);
@@ -71,11 +40,11 @@ class ProxyTranslationClient implements TranslationClient {
       final req = await client.postUrl(uri);
       req.headers.contentType = ContentType.json;
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-      _applyOptionalClientKey(req);
+
+      // EXACT payload as requested: { target, texts }
       req.write(
         jsonEncode(<String, Object?>{
           'target': targetLang,
-          'source': sourceLang,
           'texts': texts,
         }),
       );

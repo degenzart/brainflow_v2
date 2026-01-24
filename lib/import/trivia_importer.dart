@@ -52,6 +52,7 @@ class TriviaImporter {
           question: question,
           answers: allAnswers,
           correctAnswer: correct,
+          sourceLanguage: 'en',
           category: _decodeHtml(map['category'] as String? ?? ''),
           difficulty: (map['difficulty'] as String?)?.toLowerCase(),
           createdAt: now,

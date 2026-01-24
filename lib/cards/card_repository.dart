@@ -1,22 +1,69 @@
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import 'card_model.dart';
 import 'seed_cards.dart';
+import '../translation/proxy_translation_client.dart';
 
 class CardRepository {
   CardRepository(this._prefs);
 
+  static final Uri _translationWorkerBaseUrl =
+      Uri.parse('https://brainflow-translate.bjdybkw57j.workers.dev');
+
   static const String _cardsKey = 'cards_v1';
   static const String _seedPersistedKey = 'seed_persisted_v1';
+  static bool _didLogSourceLanguageStats = false;
 
   final SharedPreferences _prefs;
+
+  ProxyTranslationClient createTranslationClient() {
+    return ProxyTranslationClient(baseUrl: _translationWorkerBaseUrl);
+  }
 
   Future<List<CardModel>> load() async {
     final raw = _prefs.getString(_cardsKey);
     if (raw == null || raw.trim().isEmpty) return const <CardModel>[];
 
     try {
-      return CardModel.decodeList(raw);
+      final cards = CardModel.decodeList(raw);
+
+      if (!_didLogSourceLanguageStats) {
+        _didLogSourceLanguageStats = true;
+        try {
+          final total = cards.length;
+          var en = 0;
+          var de = 0;
+          var es = 0;
+          var other = 0;
+
+          for (final c in cards) {
+            final code = c.sourceLanguage.toLowerCase().trim();
+            switch (code) {
+              case 'en':
+                en++;
+                break;
+              case 'de':
+                de++;
+                break;
+              case 'es':
+                es++;
+                break;
+              default:
+                other++;
+                break;
+            }
+          }
+
+          debugPrint(
+            'SOURCE_LANGUAGE STATS: total=$total, en=$en, de=$de, es=$es, other=$other',
+          );
+        } catch (_) {
+          // Never crash on debug stats.
+        }
+      }
+
+      return cards;
     } catch (_) {
       // If storage got corrupted, don't crash the app.
       return const <CardModel>[];
@@ -40,10 +87,15 @@ class CardRepository {
   /// Returns a new CardModel with question/answers/correctAnswer from translation if available
   CardModel resolveForLocale(CardModel raw, String localeCode) {
     // Normalize locale code (e.g., 'en_US' -> 'en')
-    final normalizedLocale = localeCode.split('_').first.toLowerCase();
+    final targetLang = localeCode.split('_').first.toLowerCase().trim();
 
-    if (raw.translations != null && raw.translations!.containsKey(normalizedLocale)) {
-      final translation = raw.translations![normalizedLocale]!;
+    // Fast-path: if target matches the base content language, we can return raw.
+    if (targetLang.isNotEmpty && targetLang == raw.sourceLanguage) {
+      return raw;
+    }
+
+    if (raw.translations != null && raw.translations!.containsKey(targetLang)) {
+      final translation = raw.translations![targetLang]!;
       final correctAnswer = translation.answers[translation.correctIndex];
 
       return CardModel(
@@ -51,6 +103,7 @@ class CardRepository {
         question: translation.question,
         answers: translation.answers,
         correctAnswer: correctAnswer,
+        sourceLanguage: raw.sourceLanguage,
         category: raw.category,
         difficulty: raw.difficulty,
         createdAt: raw.createdAt,
@@ -109,4 +162,3 @@ class MergeResult {
   final List<CardModel> cards;
   final int newCount;
 }
-

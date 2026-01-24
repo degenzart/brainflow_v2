@@ -1,0 +1,9 @@
+name = "brainflow-translation-worker"
+main = "index.ts"
+compatibility_date = "2025-01-01"
+
+# Optional KV cache (recommended)
+kv_namespaces = [
+  { binding = "TRANSLATION_CACHE", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
+]
+

@@ -36,6 +36,7 @@ class CardModel {
     required this.question,
     required this.answers,
     required this.correctAnswer,
+    this.sourceLanguage = 'en',
     this.category,
     this.difficulty,
     required this.createdAt,
@@ -47,17 +48,46 @@ class CardModel {
   final String question;
   final List<String> answers;
   final String correctAnswer;
+  /// Language of the *base* content fields (question/answers) for this card.
+  /// ISO-ish lowercase language codes like 'en', 'de', 'es'. Defaults to 'en'.
+  final String sourceLanguage;
   final String? category;
   final String? difficulty;
   final DateTime createdAt;
   final String? source;
   final Map<String, CardText>? translations;
 
+  static String _normalizeLanguageCode(Object? value) {
+    final raw = (value is String ? value : '').trim().toLowerCase();
+    if (raw.isEmpty) return 'en';
+    // Very small validator: 2-5 letters or dash (e.g. 'pt', 'zh-cn').
+    final ok = RegExp(r'^[a-z]{2,5}(-[a-z]{2,5})?$').hasMatch(raw);
+    return ok ? raw : 'en';
+  }
+
+  CardModel withSourceLanguage(String languageCode) {
+    final normalized = _normalizeLanguageCode(languageCode);
+    if (normalized == sourceLanguage) return this;
+    return CardModel(
+      id: id,
+      question: question,
+      answers: answers,
+      correctAnswer: correctAnswer,
+      sourceLanguage: normalized,
+      category: category,
+      difficulty: difficulty,
+      createdAt: createdAt,
+      source: source,
+      translations: translations,
+    );
+  }
+
   Map<String, Object?> toMap() => <String, Object?>{
         'id': id,
         'question': question,
         'answers': answers,
         'correctAnswer': correctAnswer,
+        'sourceLanguage': sourceLanguage,
         'category': category,
         'difficulty': difficulty,
         'createdAt': createdAt.toIso8601String(),
@@ -85,6 +115,7 @@ class CardModel {
       question: map['question'] as String,
       answers: (map['answers'] as List<dynamic>).cast<String>(),
       correctAnswer: map['correctAnswer'] as String,
+      sourceLanguage: _normalizeLanguageCode(map['sourceLanguage']),
       category: map['category'] as String?,
       difficulty: map['difficulty'] as String?,
       createdAt: DateTime.parse(map['createdAt'] as String),
