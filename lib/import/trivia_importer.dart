@@ -15,6 +15,7 @@ class TriviaImporter {
         'amount': '$amount',
         'type': 'multiple',
       });
+      final sourceLanguage = _detectSourceLanguageFromUri(uri);
 
       final req = await client.getUrl(uri);
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -52,7 +53,8 @@ class TriviaImporter {
           question: question,
           answers: allAnswers,
           correctAnswer: correct,
-          sourceLanguage: 'en',
+          sourceLanguage: sourceLanguage,
+          originType: CardOriginType.original,
           category: _decodeHtml(map['category'] as String? ?? ''),
           difficulty: (map['difficulty'] as String?)?.toLowerCase(),
           createdAt: now,
@@ -63,6 +65,14 @@ class TriviaImporter {
       client.close(force: true);
     }
   }
+}
+
+String _detectSourceLanguageFromUri(Uri uri) {
+  final host = uri.host.toLowerCase();
+  if (host.contains('opentrivia.de')) return 'de';
+  if (host.contains('opentdb.com')) return 'en';
+  // Default / unknown source
+  return 'en';
 }
 
 String _stableId({

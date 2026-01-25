@@ -167,12 +167,13 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _importer = const TriviaImporter();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
-  static bool _didLogAddedTranslationsCount = false;
 
   var _section = DrawerSection.flow;
   var _loading = true;
   List<CardModel> _cards = const <CardModel>[];
+  String _effectiveLanguageCode = 'en';
   bool _persistingTranslations = false;
+  Timer? _translationWaveTimer;
   
   // Settings state
   bool _hapticsEnabled = true;
@@ -194,6 +195,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onLocaleChanged() {
+    _translationWaveTimer?.cancel();
     _loadCards();
   }
 
@@ -231,6 +233,7 @@ class _HomeScreenState extends State<HomeScreen> {
     
     setState(() {
       _cards = resolvedCards;
+      _effectiveLanguageCode = effectiveLanguageCode;
       _loading = false;
     });
 
@@ -247,14 +250,34 @@ class _HomeScreenState extends State<HomeScreen> {
   }) async {
     if (_persistingTranslations) return;
 
-    final lang = targetLang.split('_').first.toLowerCase().trim();
+    String normalizePrimaryLang(String code) {
+      final v = code.toLowerCase().trim().replaceAll('_', '-');
+      if (v.isEmpty) return '';
+      return v.split('-').first;
+    }
+
+    bool isValidLangCode(String code) {
+      final v = code.toLowerCase().trim().replaceAll('_', '-');
+      return RegExp(r'^[a-z]{2,5}(-[a-z]{2,5})?$').hasMatch(v);
+    }
+
+    String normalizeSourceLangForWorker(String sourceLanguage) {
+      final v = sourceLanguage.toLowerCase().trim().replaceAll('_', '-');
+      if (v.isEmpty) return 'auto';
+      if (v == 'auto') return 'auto';
+      return isValidLangCode(v) ? v : 'auto';
+    }
+
+    final lang = normalizePrimaryLang(targetLang);
     if (lang.isEmpty || lang == 'en' || lang == 'system') return;
 
     // Quick pre-check: do we have any card that actually needs a translation?
-    final needsAny = rawCards.any((c) {
-      if (lang == c.sourceLanguage) return false;
-      final t = c.translations;
-      return t == null || !t.containsKey(lang);
+    final needsAny = rawCards.any((card) {
+      final sourcePrimary = normalizePrimaryLang(card.sourceLanguage);
+      if (lang == sourcePrimary) return false;
+      final t = card.translations;
+      if (t != null && t.containsKey(lang)) return false;
+      return true;
     });
     if (!needsAny) return;
 
@@ -262,19 +285,33 @@ class _HomeScreenState extends State<HomeScreen> {
     var addedTranslationsCount = 0;
 
     try {
+      const maxTranslationsPerRun = 10;
+      const prioritizeFirstN = 30;
       final client = widget.repository.createTranslationClient();
       final updatedCards = <CardModel>[];
       var changed = false;
+      var hasMorePending = false;
 
-      for (final card in rawCards) {
+      final prioritized = <CardModel>[
+        ...rawCards.take(prioritizeFirstN),
+        ...rawCards.skip(prioritizeFirstN),
+      ];
+
+      for (final card in prioritized) {
         // Never translate if targetLang equals source language.
-        if (lang == card.sourceLanguage) {
+        final sourcePrimary = normalizePrimaryLang(card.sourceLanguage);
+        if (lang == sourcePrimary) {
+          updatedCards.add(card);
+          continue;
+        }
+        final existing = card.translations;
+        if (existing != null && existing.containsKey(lang)) {
           updatedCards.add(card);
           continue;
         }
 
-        final existing = card.translations;
-        if (existing != null && existing.containsKey(lang)) {
+        if (addedTranslationsCount >= maxTranslationsPerRun) {
+          hasMorePending = true;
           updatedCards.add(card);
           continue;
         }
@@ -283,10 +320,11 @@ class _HomeScreenState extends State<HomeScreen> {
 
         List<String> translated;
         try {
+          final sourceLangForWorker = normalizeSourceLangForWorker(card.sourceLanguage);
           translated = await client.translateBatch(
             texts: texts,
             targetLang: lang,
-            sourceLang: 'auto',
+            sourceLang: sourceLangForWorker,
           );
         } catch (_) {
           // Failsafe: do not persist on failure.
@@ -321,6 +359,9 @@ class _HomeScreenState extends State<HomeScreen> {
             answers: card.answers,
             correctAnswer: card.correctAnswer,
             sourceLanguage: card.sourceLanguage,
+            originType: card.originType == CardOriginType.unknown
+                ? CardOriginType.translated
+                : card.originType,
             category: card.category,
             difficulty: card.difficulty,
             createdAt: card.createdAt,
@@ -347,9 +388,19 @@ class _HomeScreenState extends State<HomeScreen> {
         _cards = resolved;
       });
 
-      if (!_didLogAddedTranslationsCount) {
-        _didLogAddedTranslationsCount = true;
-        debugPrint('ADDED TRANSLATIONS: addedTranslationsCount=$addedTranslationsCount');
+      // Wave scheduling: if we still have pending cards, run again silently.
+      if (hasMorePending && addedTranslationsCount > 0) {
+        _translationWaveTimer?.cancel();
+        _translationWaveTimer = Timer(const Duration(seconds: 2), () {
+          if (!mounted) return;
+          if (_persistingTranslations) return;
+          unawaited(
+            _persistMissingTranslationsIfNeeded(
+              rawCards: updatedCards,
+              targetLang: lang,
+            ),
+          );
+        });
       }
     } catch (_) {
       // Hard failsafe: never crash.
@@ -601,6 +652,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 )
                               : _FlowView(
                                   cards: _cards,
+                                  effectiveLanguageCode: _effectiveLanguageCode,
                                   onReport: _openReportSheet,
                                 ),
                     ),
@@ -1259,10 +1311,12 @@ class _SettingsScreen extends StatelessWidget {
 class _FlowView extends StatefulWidget {
   const _FlowView({
     required this.cards,
+    required this.effectiveLanguageCode,
     required this.onReport,
   });
 
   final List<CardModel> cards;
+  final String effectiveLanguageCode;
   final Future<void> Function(CardModel card) onReport;
 
   @override
@@ -1486,6 +1540,7 @@ class _FlowViewState extends State<_FlowView> {
                           children: [
                             _FlowTopRow(
                               card: card,
+                              effectiveLanguageCode: widget.effectiveLanguageCode,
                               onReport: () => widget.onReport(card),
                             ),
                             const SizedBox(height: 12),
@@ -1599,10 +1654,74 @@ class _FlowViewState extends State<_FlowView> {
 }
 
 class _FlowTopRow extends StatelessWidget {
-  const _FlowTopRow({required this.card, required this.onReport});
+  const _FlowTopRow({
+    required this.card,
+    required this.effectiveLanguageCode,
+    required this.onReport,
+  });
 
   final CardModel card;
+  final String effectiveLanguageCode;
   final VoidCallback onReport;
+
+  String _normalizePrimaryLang(String code) {
+    final v = code.toLowerCase().trim().replaceAll('_', '-');
+    if (v.isEmpty) return '';
+    return v.split('-').first;
+  }
+
+  String _displayLang(String code) {
+    final primary = _normalizePrimaryLang(code);
+    if (primary == 'auto') return 'AUTO';
+    final ok = RegExp(r'^[a-z]{2,5}$').hasMatch(primary);
+    return ok ? primary.toUpperCase() : '??';
+  }
+
+  bool _isTranslatedForDisplay(CardModel card, String effectiveLang) {
+    final src = _normalizePrimaryLang(card.sourceLanguage);
+    final tgt = _normalizePrimaryLang(effectiveLang);
+    if (src.isEmpty || tgt.isEmpty) return false;
+    if (src == tgt) return false;
+    final t = card.translations;
+    return t != null && t.containsKey(tgt);
+  }
+
+  Widget _originPill(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final src = _displayLang(card.sourceLanguage);
+    final tgt = _displayLang(effectiveLanguageCode);
+    final translated = _isTranslatedForDisplay(card, effectiveLanguageCode);
+
+    final text = translated ? '$src→$tgt' : src;
+    final icon = translated ? Icons.auto_awesome_outlined : Icons.language_rounded;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: cs.surface.withValues(alpha: 0.20),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.24),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: Colors.white.withValues(alpha: 0.92)),
+          const SizedBox(width: 4),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1617,6 +1736,8 @@ class _FlowTopRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             const Spacer(),
+            _originPill(context),
+            const SizedBox(width: 6),
             IconButton(
               tooltip: AppLocalizations.of(context)!.report_title,
               onPressed: onReport,
@@ -1659,14 +1780,7 @@ class _FlowCard extends StatelessWidget {
       children: [
         const SizedBox(height: 4),
         Center(
-          child: SizedBox(
-            height: 58,
-            width: 58,
-            child: SvgPicture.asset(
-              style.assetPath,
-              colorFilter: ColorFilter.mode(style.color, BlendMode.srcIn),
-            ),
-          ),
+          child: _CategoryPictogram(style: style),
         ),
         const SizedBox(height: 10),
         Flexible(
@@ -1707,6 +1821,55 @@ class _FlowCard extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _CategoryPictogram extends StatelessWidget {
+  const _CategoryPictogram({required this.style});
+
+  final _CategoryStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final c = style.color;
+
+    return Container(
+      height: 88,
+      width: 88,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(28),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            cs.surface.withValues(alpha: 0.92),
+            c.withValues(alpha: 0.10),
+          ],
+        ),
+        border: Border.all(
+          color: c.withValues(alpha: 0.35),
+          width: 1.2,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: c.withValues(alpha: 0.18),
+            blurRadius: 18,
+            offset: const Offset(0, 10),
+          ),
+        ],
+      ),
+      child: Center(
+        child: SizedBox(
+          height: 56,
+          width: 56,
+          child: SvgPicture.asset(
+            style.assetPath,
+            colorFilter: ColorFilter.mode(c, BlendMode.srcIn),
+          ),
+        ),
+      ),
     );
   }
 }

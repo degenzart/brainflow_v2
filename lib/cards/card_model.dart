@@ -30,6 +30,13 @@ class CardText {
   }
 }
 
+enum CardOriginType {
+  original,
+  translated,
+  mixed,
+  unknown,
+}
+
 class CardModel {
   const CardModel({
     required this.id,
@@ -37,6 +44,7 @@ class CardModel {
     required this.answers,
     required this.correctAnswer,
     this.sourceLanguage = 'en',
+    this.originType = CardOriginType.unknown,
     this.category,
     this.difficulty,
     required this.createdAt,
@@ -51,6 +59,13 @@ class CardModel {
   /// Language of the *base* content fields (question/answers) for this card.
   /// ISO-ish lowercase language codes like 'en', 'de', 'es'. Defaults to 'en'.
   final String sourceLanguage;
+  /// Marker describing where this card's content comes from.
+  ///
+  /// - original: content is native/original for [sourceLanguage]
+  /// - translated: at least one machine translation exists (via worker)
+  /// - mixed: partial translation (reserved for future)
+  /// - unknown: legacy/fallback
+  final CardOriginType originType;
   final String? category;
   final String? difficulty;
   final DateTime createdAt;
@@ -65,6 +80,21 @@ class CardModel {
     return ok ? raw : 'en';
   }
 
+  static CardOriginType _parseOriginType(Object? value) {
+    final raw = (value is String ? value : '').trim().toLowerCase();
+    switch (raw) {
+      case 'original':
+        return CardOriginType.original;
+      case 'translated':
+        return CardOriginType.translated;
+      case 'mixed':
+        return CardOriginType.mixed;
+      case 'unknown':
+      default:
+        return CardOriginType.unknown;
+    }
+  }
+
   CardModel withSourceLanguage(String languageCode) {
     final normalized = _normalizeLanguageCode(languageCode);
     if (normalized == sourceLanguage) return this;
@@ -74,6 +104,24 @@ class CardModel {
       answers: answers,
       correctAnswer: correctAnswer,
       sourceLanguage: normalized,
+      originType: originType,
+      category: category,
+      difficulty: difficulty,
+      createdAt: createdAt,
+      source: source,
+      translations: translations,
+    );
+  }
+
+  CardModel withOriginType(CardOriginType type) {
+    if (type == originType) return this;
+    return CardModel(
+      id: id,
+      question: question,
+      answers: answers,
+      correctAnswer: correctAnswer,
+      sourceLanguage: sourceLanguage,
+      originType: type,
       category: category,
       difficulty: difficulty,
       createdAt: createdAt,
@@ -88,6 +136,7 @@ class CardModel {
         'answers': answers,
         'correctAnswer': correctAnswer,
         'sourceLanguage': sourceLanguage,
+        'originType': originType.name,
         'category': category,
         'difficulty': difficulty,
         'createdAt': createdAt.toIso8601String(),
@@ -116,6 +165,7 @@ class CardModel {
       answers: (map['answers'] as List<dynamic>).cast<String>(),
       correctAnswer: map['correctAnswer'] as String,
       sourceLanguage: _normalizeLanguageCode(map['sourceLanguage']),
+      originType: _parseOriginType(map['originType']),
       category: map['category'] as String?,
       difficulty: map['difficulty'] as String?,
       createdAt: DateTime.parse(map['createdAt'] as String),

@@ -1190,4 +1190,6 @@ final seedCards = <CardModel>[
       },
     );
   }),
-].map((c) => c.withSourceLanguage('en')).toList(growable: false);
+]
+    .map((c) => c.withSourceLanguage('en').withOriginType(CardOriginType.original))
+    .toList(growable: false);

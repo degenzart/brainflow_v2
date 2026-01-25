@@ -1,5 +1,4 @@
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
 
 import 'card_model.dart';
 import 'seed_cards.dart';
@@ -13,7 +12,6 @@ class CardRepository {
 
   static const String _cardsKey = 'cards_v1';
   static const String _seedPersistedKey = 'seed_persisted_v1';
-  static bool _didLogSourceLanguageStats = false;
 
   final SharedPreferences _prefs;
 
@@ -26,44 +24,7 @@ class CardRepository {
     if (raw == null || raw.trim().isEmpty) return const <CardModel>[];
 
     try {
-      final cards = CardModel.decodeList(raw);
-
-      if (!_didLogSourceLanguageStats) {
-        _didLogSourceLanguageStats = true;
-        try {
-          final total = cards.length;
-          var en = 0;
-          var de = 0;
-          var es = 0;
-          var other = 0;
-
-          for (final c in cards) {
-            final code = c.sourceLanguage.toLowerCase().trim();
-            switch (code) {
-              case 'en':
-                en++;
-                break;
-              case 'de':
-                de++;
-                break;
-              case 'es':
-                es++;
-                break;
-              default:
-                other++;
-                break;
-            }
-          }
-
-          debugPrint(
-            'SOURCE_LANGUAGE STATS: total=$total, en=$en, de=$de, es=$es, other=$other',
-          );
-        } catch (_) {
-          // Never crash on debug stats.
-        }
-      }
-
-      return cards;
+      return CardModel.decodeList(raw);
     } catch (_) {
       // If storage got corrupted, don't crash the app.
       return const <CardModel>[];
@@ -87,10 +48,21 @@ class CardRepository {
   /// Returns a new CardModel with question/answers/correctAnswer from translation if available
   CardModel resolveForLocale(CardModel raw, String localeCode) {
     // Normalize locale code (e.g., 'en_US' -> 'en')
-    final targetLang = localeCode.split('_').first.toLowerCase().trim();
+    final targetLang = localeCode
+        .toLowerCase()
+        .trim()
+        .replaceAll('_', '-')
+        .split('-')
+        .first;
+    final sourcePrimary = raw.sourceLanguage
+        .toLowerCase()
+        .trim()
+        .replaceAll('_', '-')
+        .split('-')
+        .first;
 
     // Fast-path: if target matches the base content language, we can return raw.
-    if (targetLang.isNotEmpty && targetLang == raw.sourceLanguage) {
+    if (targetLang.isNotEmpty && sourcePrimary.isNotEmpty && targetLang == sourcePrimary) {
       return raw;
     }
 
@@ -104,6 +76,7 @@ class CardRepository {
         answers: translation.answers,
         correctAnswer: correctAnswer,
         sourceLanguage: raw.sourceLanguage,
+        originType: raw.originType,
         category: raw.category,
         difficulty: raw.difficulty,
         createdAt: raw.createdAt,

@@ -16,13 +16,25 @@ class ProxyTranslationClient implements TranslationClient {
 
   Uri _translateBatchUri() => _baseUrl.resolve('/translateBatch');
 
+  static String _normalizeSourceLang(String sourceLang) {
+    final raw = sourceLang.toLowerCase().trim().replaceAll('_', '-');
+    if (raw.isEmpty) return 'auto';
+    if (raw == 'auto') return 'auto';
+    final ok = RegExp(r'^[a-z]{2,5}(-[a-z]{2,5})?$').hasMatch(raw);
+    return ok ? raw : 'auto';
+  }
+
   @override
   Future<String> translate({
     required String text,
     required String targetLang,
     String sourceLang = 'auto',
   }) async {
-    final out = await translateBatch(texts: <String>[text], targetLang: targetLang);
+    final out = await translateBatch(
+      texts: <String>[text],
+      targetLang: targetLang,
+      sourceLang: sourceLang,
+    );
     return out.isNotEmpty ? out.first : '';
   }
 
@@ -33,6 +45,7 @@ class ProxyTranslationClient implements TranslationClient {
     String sourceLang = 'auto',
   }) async {
     final uri = _translateBatchUri();
+    final normalizedSourceLang = _normalizeSourceLang(sourceLang);
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 10);
 
@@ -41,11 +54,13 @@ class ProxyTranslationClient implements TranslationClient {
       req.headers.contentType = ContentType.json;
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
 
-      // EXACT payload as requested: { target, texts }
+      // Payload includes at minimum { target, texts }.
+      // We also pass `source` to avoid unnecessary auto-detection where possible.
       req.write(
         jsonEncode(<String, Object?>{
           'target': targetLang,
           'texts': texts,
+          'source': normalizedSourceLang,
         }),
       );
 
