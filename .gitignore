@@ -50,3 +50,7 @@ app.*.map.json
 translation-worker/.dev.vars
 translation-worker/.wrangler/
 translation-worker/node_modules/
+# --- brainflow: worker local files ---
+translation-worker/.dev.vars
+translation-worker/.wrangler/
+translation-worker/node_modules/
