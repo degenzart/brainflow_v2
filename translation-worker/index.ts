@@ -21,7 +21,8 @@ type TranslateBatchResponse = {
     | "mixed_studio"
     | "mixed_company"
     | "mixed_keep_answers"
-    | "mixed_answers";
+    | "mixed_answers"
+    | "mixed_units";
   rule?: string;
   build?: string;
   unitFixApplied?: boolean;
@@ -371,7 +372,10 @@ function unitConversionPostprocessMiles({
   const mode: UnitFixResult["mode"] = imperial ? "km_to_mi" : "mi_to_km";
 
   // Match number + unit (miles): "26.2 miles", "26,2 mile", "5 mi"
-  const reMiles = /\b(\d[\d\s'.,]*)\s*(miles?|mile|mi)\b/gi;
+  const reMiles =
+    tgt === "de"
+      ? /\b(\d[\d\s'.,]*)\s*(miles?|mile|mi|meilen?)\b/gi
+      : /\b(\d[\d\s'.,]*)\s*(miles?|mile|mi)\b/gi;
   // Match number + unit (km): "42.2 km", "42,2 km", "5km", "10 km"
   // Avoid matching "km/h" etc.
   const reKm = /\b(\d[\d\s'.,]*)\s*km\b(?!\s*\/)/gi;
@@ -851,6 +855,87 @@ export default {
             }
           : { translated: unitFixed.translated };
         return json(withBuild(resp), { status: 200 });
+      }
+    } catch {
+      // Never crash; fall through to normal flow.
+    }
+
+    // NEW SPECIAL MODE: mixed_units for answer-lists that are just miles values.
+    // - Translate ONLY the question
+    // - Compute answers from ORIGINAL inputs (no Google on answers)
+    // Must run before cache + before any full-translate path.
+    try {
+      const texts = params.texts;
+      if (texts.length >= 3) {
+        const unitAnswerRe = /^\s*\d+(?:[.,]\d+)?\s*(miles?|mi)\s*$/i;
+        var matches = 0;
+        for (let i = 1; i < texts.length; i++) {
+          if (unitAnswerRe.test(String(texts[i] ?? ""))) matches++;
+        }
+
+        if (matches >= 2) {
+          const tgt = primaryLang(params.target);
+          const imperial = usesImperial(params.target);
+
+          // Translate question (single item) with keep-token protection.
+          const qRaw = String(texts[0] ?? "");
+          let translatedQuestion = qRaw;
+          if (qRaw) {
+            try {
+              const counter = { value: 1 };
+              const protectedQ = applyProtection(qRaw, counter);
+              const tiny = await translateWithGoogleV2(
+                { target: params.target, source: params.source, texts: [protectedQ.text] },
+                env.GOOGLE_API_KEY,
+              );
+              if (Array.isArray(tiny) && typeof tiny[0] === "string" && tiny[0].length > 0) {
+                translatedQuestion = restoreProtection(tiny[0], protectedQ.replacements);
+              }
+            } catch {
+              translatedQuestion = qRaw;
+            }
+          }
+
+          const outAnswers: string[] = [];
+          for (let i = 1; i < texts.length; i++) {
+            const raw = String(texts[i] ?? "");
+            if (imperial) {
+              outAnswers.push(raw); // keep as-is for EN targets
+              continue;
+            }
+
+            const m = raw.match(/^\s*(\d+(?:[.,]\d+)?)\s*(miles?|mi)\s*$/i);
+            if (!m) {
+              outAnswers.push(raw);
+              continue;
+            }
+            const parsed = _parseLocaleNumber(m[1] ?? "");
+            if (!parsed) {
+              outAnswers.push(raw);
+              continue;
+            }
+
+            const miles = parsed.value;
+            const km = miles * 1.609344;
+            const milesDecimals = parsed.hadDecimal ? 1 : 0;
+
+            if (tgt === "de") {
+              const milesStr = _formatNumber(miles, milesDecimals, "de");
+              const kmStr = _formatNumber(km, 1, "de");
+              outAnswers.push(`${milesStr} Meilen (${kmStr} km)`);
+            } else {
+              const milesStr = _formatNumber(miles, milesDecimals, "en");
+              const kmStr = _formatNumber(km, 1, "en");
+              outAnswers.push(`${milesStr} miles (${kmStr} km)`);
+            }
+          }
+
+          const translated = [translatedQuestion, ...outAnswers];
+          const resp: TranslateBatchResponse = debug
+            ? { translated, mode: "mixed_units", rule: "mixed_units_miles_answers" }
+            : { translated };
+          return json(withBuild(resp), { status: 200 });
+        }
       }
     } catch {
       // Never crash; fall through to normal flow.
