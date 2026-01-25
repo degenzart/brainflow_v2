@@ -24,6 +24,9 @@ type TranslateBatchResponse = {
     | "mixed_answers";
   rule?: string;
   build?: string;
+  unitFixApplied?: boolean;
+  unitFixHits?: number;
+  unitFixMode?: "mi_to_km" | "km_to_mi" | "none";
 };
 
 type ErrorResponse = {
@@ -47,6 +50,10 @@ function serverError(message: string): Response {
 function wantsDebug(request: Request): boolean {
   const v = request.headers.get("x-debug") ?? request.headers.get("X-Debug") ?? "";
   return v.trim() === "1";
+}
+
+function primaryLang(code: string): string {
+  return code.trim().toLowerCase().replace(/_/g, "-").split("-")[0];
 }
 
 function isValidLang(code: string): boolean {
@@ -293,6 +300,134 @@ function isCharacterAnswersPassthroughQuestion(q: string): boolean {
   return hasFromOrGame;
 }
 
+function usesImperial(targetLang: string): boolean {
+  // Our MVP definition: English => imperial; everything else => metric.
+  return primaryLang(targetLang) === "en";
+}
+
+type UnitFixResult = {
+  translated: string[];
+  hits: number;
+  mode: "mi_to_km" | "km_to_mi" | "none";
+};
+
+function _parseLocaleNumber(raw: string): { value: number; hadDecimal: boolean } | null {
+  // Robust parsing for inputs like:
+  // - 26.2
+  // - 26,2
+  // - 1,234.5
+  // - 1.234,5
+  const s0 = raw.trim();
+  if (!s0) return null;
+
+  const hadDecimal = /[.,]\d+/.test(s0);
+
+  // Remove spaces and apostrophes (common thousands separators).
+  let s = s0.replace(/[\s']/g, "");
+
+  const lastComma = s.lastIndexOf(",");
+  const lastDot = s.lastIndexOf(".");
+
+  if (lastComma !== -1 && lastDot !== -1) {
+    // Choose decimal separator by whichever appears last.
+    if (lastComma > lastDot) {
+      // comma decimal, dots thousands
+      s = s.replace(/\./g, "").replace(/,/g, ".");
+    } else {
+      // dot decimal, commas thousands
+      s = s.replace(/,/g, "");
+    }
+  } else if (lastComma !== -1) {
+    // comma decimal (or thousands); assume decimal if comma is followed by digits at end.
+    s = s.replace(/,/g, ".");
+  } else {
+    // dot decimal or plain integer -> keep as is
+  }
+
+  const v = Number.parseFloat(s);
+  if (!Number.isFinite(v)) return null;
+  return { value: v, hadDecimal };
+}
+
+function _formatNumber(value: number, decimals: number, lang: string): string {
+  const fixed = value.toFixed(decimals);
+  if (lang === "de") return fixed.replace(".", ",");
+  return fixed;
+}
+
+function unitConversionPostprocessMiles({
+  translated,
+  targetLang,
+  applyIndices,
+}: {
+  translated: string[];
+  targetLang: string;
+  applyIndices: { start: number; end: number }; // [start, end)
+}): UnitFixResult {
+  const tgt = primaryLang(targetLang);
+  if (!tgt) return { translated, hits: 0, mode: "none" };
+
+  const imperial = usesImperial(targetLang);
+  const mode: UnitFixResult["mode"] = imperial ? "km_to_mi" : "mi_to_km";
+
+  // Match number + unit (miles): "26.2 miles", "26,2 mile", "5 mi"
+  const reMiles = /\b(\d[\d\s'.,]*)\s*(miles?|mile|mi)\b/gi;
+  // Match number + unit (km): "42.2 km", "42,2 km", "5km", "10 km"
+  // Avoid matching "km/h" etc.
+  const reKm = /\b(\d[\d\s'.,]*)\s*km\b(?!\s*\/)/gi;
+
+  const out = translated.slice();
+  let hits = 0;
+
+  for (let i = applyIndices.start; i < applyIndices.end && i < out.length; i++) {
+    const s = out[i];
+    if (typeof s !== "string" || s.length === 0) continue;
+
+    if (imperial) {
+      // km -> miles for EN (imperial)
+      out[i] = s.replace(reKm, (full, numRaw) => {
+        const parsed = _parseLocaleNumber(String(numRaw));
+        if (!parsed) return full;
+
+        const km = parsed.value;
+        const miles = km / 1.609344;
+
+        const milesStr = _formatNumber(miles, 1, "en");
+        const kmStr = _formatNumber(km, 1, "en");
+
+        hits++;
+        return `${milesStr} miles (${kmStr} km)`;
+      });
+    } else {
+      // miles -> km for metric targets (incl. DE special formatting)
+      out[i] = s.replace(reMiles, (full, numRaw) => {
+        const parsed = _parseLocaleNumber(String(numRaw));
+        if (!parsed) return full;
+
+        const miles = parsed.value;
+        const km = miles * 1.609344;
+
+        // Consistent: km always 1 decimal. Miles: keep 0 decimals if input had none, else 1.
+        const milesDecimals = parsed.hadDecimal ? 1 : 0;
+        const milesStr = _formatNumber(miles, milesDecimals, tgt);
+        const kmStr = _formatNumber(km, 1, tgt);
+
+        hits++;
+
+        if (tgt === "de") {
+          // Option B for DE.
+          return `${milesStr} Meilen (${kmStr} km)`;
+        }
+
+        // Option A for others (metric default).
+        return `${kmStr} km`;
+      });
+    }
+  }
+
+  return { translated: out, hits, mode };
+}
+
 // --- Template-based mixed-mode (question only; answers untouched) ---
 //
 // Goal: avoid translating proper-noun answers (e.g. "Glass" -> "Glas") by translating ONLY the question,
@@ -460,10 +595,6 @@ function modeForType(t: TemplateType): TranslateBatchResponse["mode"] {
   }
 }
 
-function primaryLang(code: string): string {
-  return code.trim().toLowerCase().replace(/_/g, "-").split("-")[0];
-}
-
 function buildLocalTemplate(type: TemplateType, entity: string, source: string, target: string): string | null {
   const s = primaryLang(source);
   const t = primaryLang(target);
@@ -622,7 +753,20 @@ export default {
           }
 
           const translated = [mixedQuestion, ...params.texts.slice(1)];
-          const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed" } : { translated };
+          const unitFixed = unitConversionPostprocessMiles({
+            translated,
+            targetLang: params.target,
+            applyIndices: { start: 1, end: translated.length },
+          });
+          const resp: TranslateBatchResponse = debug
+            ? {
+                translated: unitFixed.translated,
+                mode: "mixed",
+                unitFixApplied: unitFixed.hits > 0,
+                unitFixHits: unitFixed.hits,
+                unitFixMode: unitFixed.mode,
+              }
+            : { translated: unitFixed.translated };
           return json(withBuild(resp), { status: 200 });
         }
       }
@@ -641,7 +785,20 @@ export default {
         if (entity) {
           const translatedQuestion = `In welcher Stadt ist ${entity} angesiedelt?`;
           const translated = [translatedQuestion, ...params.texts.slice(1)];
-          const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed_city" } : { translated };
+          const unitFixed = unitConversionPostprocessMiles({
+            translated,
+            targetLang: params.target,
+            applyIndices: { start: 1, end: translated.length },
+          });
+          const resp: TranslateBatchResponse = debug
+            ? {
+                translated: unitFixed.translated,
+                mode: "mixed_city",
+                unitFixApplied: unitFixed.hits > 0,
+                unitFixHits: unitFixed.hits,
+                unitFixMode: unitFixed.mode,
+              }
+            : { translated: unitFixed.translated };
           return json(withBuild(resp), { status: 200 });
         }
       }
@@ -678,9 +835,21 @@ export default {
         }
 
         const translated = [translatedQuestion, ...texts.slice(1)];
+        const unitFixed = unitConversionPostprocessMiles({
+          translated,
+          targetLang: params.target,
+          applyIndices: { start: 1, end: translated.length },
+        });
         const resp: TranslateBatchResponse = debug
-          ? { translated, mode: "mixed_answers", rule: "mixed_answers_character" }
-          : { translated };
+          ? {
+              translated: unitFixed.translated,
+              mode: "mixed_answers",
+              rule: "mixed_answers_character",
+              unitFixApplied: unitFixed.hits > 0,
+              unitFixHits: unitFixed.hits,
+              unitFixMode: unitFixed.mode,
+            }
+          : { translated: unitFixed.translated };
         return json(withBuild(resp), { status: 200 });
       }
     } catch {
@@ -750,7 +919,20 @@ export default {
             expirationTtl: 60 * 60 * 24 * 30,
           });
         }
-        const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed_keep_answers" } : { translated };
+        const unitFixed = unitConversionPostprocessMiles({
+          translated,
+          targetLang: params.target,
+          applyIndices: { start: 1, end: translated.length },
+        });
+        const resp: TranslateBatchResponse = debug
+          ? {
+              translated: unitFixed.translated,
+              mode: "mixed_keep_answers",
+              unitFixApplied: unitFixed.hits > 0,
+              unitFixHits: unitFixed.hits,
+              unitFixMode: unitFixed.mode,
+            }
+          : { translated: unitFixed.translated };
         return json(withBuild(resp), { status: 200 });
       }
 
@@ -795,7 +977,20 @@ export default {
           });
         }
         const mode = modeForType(type);
-        const resp: TranslateBatchResponse = debug ? { translated, mode } : { translated };
+        const unitFixed = unitConversionPostprocessMiles({
+          translated,
+          targetLang: params.target,
+          applyIndices: { start: 1, end: translated.length },
+        });
+        const resp: TranslateBatchResponse = debug
+          ? {
+              translated: unitFixed.translated,
+              mode,
+              unitFixApplied: unitFixed.hits > 0,
+              unitFixHits: unitFixed.hits,
+              unitFixMode: unitFixed.mode,
+            }
+          : { translated: unitFixed.translated };
         return json(withBuild(resp), { status: 200 });
       }
 
@@ -813,14 +1008,28 @@ export default {
         return restoreProtection(typeof t === "string" ? t : "", rep);
       });
 
+      const unitFixed = unitConversionPostprocessMiles({
+        translated,
+        targetLang: params.target,
+        applyIndices: { start: 0, end: translated.length },
+      });
+
       if (env.TRANSLATION_CACHE) {
-        await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(translated), {
+        await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(unitFixed.translated), {
           // 30 days
           expirationTtl: 60 * 60 * 24 * 30,
         });
       }
 
-      const resp: TranslateBatchResponse = debug ? { translated, mode: "full" } : { translated };
+      const resp: TranslateBatchResponse = debug
+        ? {
+            translated: unitFixed.translated,
+            mode: "full",
+            unitFixApplied: unitFixed.hits > 0,
+            unitFixHits: unitFixed.hits,
+            unitFixMode: unitFixed.mode,
+          }
+        : { translated: unitFixed.translated };
       return json(withBuild(resp), { status: 200 });
     } catch (e: any) {
       return serverError(e?.message ? String(e.message) : "Translation failed.");
