@@ -12,6 +12,18 @@ type TranslateBatchRequest = {
 
 type TranslateBatchResponse = {
   translated: string[];
+  mode?:
+    | "full"
+    | "skip"
+    | "mixed"
+    | "mixed_city"
+    | "mixed_country"
+    | "mixed_studio"
+    | "mixed_company"
+    | "mixed_keep_answers"
+    | "mixed_answers";
+  rule?: string;
+  build?: string;
 };
 
 type ErrorResponse = {
@@ -30,6 +42,11 @@ function badRequest(message: string): Response {
 
 function serverError(message: string): Response {
   return json({ error: message } satisfies ErrorResponse, { status: 500 });
+}
+
+function wantsDebug(request: Request): boolean {
+  const v = request.headers.get("x-debug") ?? request.headers.get("X-Debug") ?? "";
+  return v.trim() === "1";
 }
 
 function isValidLang(code: string): boolean {
@@ -85,6 +102,416 @@ async function sha256Hex(input: string): Promise<string> {
   return hex;
 }
 
+// --- Protect tokens (Acronyms / Names) ---
+//
+// MVP protection:
+// - Dotted acronyms: T.A.R.D.I.S.  (pattern like ([A-Z].){2,})
+// - Block acronyms: NASA, FBI, DNA (pattern like \b[A-Z]{2,}\b)
+// - Simple name sequences: "Albert Einstein", "New York" (2+ Capitalized words)
+//
+// Approach: replace protected spans with stable placeholders before Google Translate,
+// then restore placeholders in the translated output.
+type ProtectedResult = {
+  text: string;
+  replacements: Map<string, string>;
+};
+
+function makePlaceholder(i: number): string {
+  // Intentionally "ugly" & stable; should not be translated.
+  return `__BF_KEEP_${i}__`;
+}
+
+function getProtectedRanges(input: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  // Dotted acronyms: T.A.R.D.I.S. / U.S.A.
+  const dotted = /(?:\b[A-Z]\.){2,}[A-Z]?\.?/g;
+  for (const m of input.matchAll(dotted)) {
+    if (m.index == null) continue;
+    ranges.push({ start: m.index, end: m.index + m[0].length });
+  }
+
+  // Block acronyms: NASA / FBI / DNA
+  const block = /\b[A-Z]{2,}\b/g;
+  for (const m of input.matchAll(block)) {
+    if (m.index == null) continue;
+    ranges.push({ start: m.index, end: m.index + m[0].length });
+  }
+
+  // Name / proper noun sequences: 2+ capitalized words, optionally allowing small connector words.
+  //
+  // Examples we want to keep as a single protected unit:
+  // - Ostrava of Boletaria
+  // - Mordecai the Hunter
+  // - Welcome to Miami
+  // - The Next Generation
+  //
+  // Keep it conservative: requires at least two capitalized words overall.
+  const names =
+    /\b\p{Lu}[\p{L}]+(?:[-'][\p{Lu}][\p{L}]+)?(?:\s+(?:(?:of|the|to|von|van|de|del|da|di|la|le|du)\s+)?\p{Lu}[\p{L}]+(?:[-'][\p{Lu}][\p{L}]+)?)+\b/gu;
+  for (const m of input.matchAll(names)) {
+    if (m.index == null) continue;
+    ranges.push({ start: m.index, end: m.index + m[0].length });
+  }
+
+  if (ranges.length <= 1) return ranges;
+
+  ranges.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  let cur = ranges[0];
+  for (let i = 1; i < ranges.length; i++) {
+    const r = ranges[i];
+    if (r.start <= cur.end) {
+      cur = { start: cur.start, end: Math.max(cur.end, r.end) };
+    } else {
+      merged.push(cur);
+      cur = r;
+    }
+  }
+  merged.push(cur);
+  return merged;
+}
+
+function applyProtection(input: string, counter: { value: number }): ProtectedResult {
+  const ranges = getProtectedRanges(input);
+  if (ranges.length === 0) return { text: input, replacements: new Map() };
+
+  const replacements = new Map<string, string>();
+  let out = "";
+  let last = 0;
+  for (const r of ranges) {
+    out += input.slice(last, r.start);
+    const original = input.slice(r.start, r.end);
+    const placeholder = makePlaceholder(counter.value++);
+    replacements.set(placeholder, original);
+    out += placeholder;
+    last = r.end;
+  }
+  out += input.slice(last);
+  return { text: out, replacements };
+}
+
+function restoreProtection(translated: string, replacements: Map<string, string>): string {
+  let out = translated;
+  for (const [ph, original] of replacements.entries()) {
+    out = out.split(ph).join(original);
+  }
+  return out;
+}
+
+function hasAnyAcronym(text: string): boolean {
+  const dotted = /(?:\b[A-Z]\.){2,}[A-Z]?\.?/;
+  const block = /\b[A-Z]{2,}\b/;
+  return dotted.test(text) || block.test(text);
+}
+
+// --- "What does ... stand for?" / "Wofür steht ...?" special case ---
+function isStandForQuestion(text: string): boolean {
+  const t = text.toLowerCase();
+  const en = t.includes("what does") && t.includes("stand for");
+  const de = t.includes("wofür steht") || t.includes("wofur steht"); // tolerate missing umlaut
+  return en || de;
+}
+
+function extractFirstAcronym(text: string): string | null {
+  const dotted = text.match(/(?:\b[A-Z]\.){2,}[A-Z]?\.?/);
+  if (dotted && dotted[0]) return dotted[0];
+  const block = text.match(/\b[A-Z]{2,}\b/);
+  if (block && block[0]) return block[0];
+  return null;
+}
+
+function buildCanonicalStandForQuestion(acronym: string, lang: string): string {
+  const l = lang.split("_")[0].toLowerCase().trim();
+  if (l === "de") return `Wofür steht ${acronym}?`;
+  if (l === "en") return `What does ${acronym} stand for?`;
+  // Fallback: keep English canonical template (will be translated in worker via a tiny call)
+  return `What does ${acronym} stand for?`;
+}
+
+function stripToTranslatableSignal(text: string): string {
+  // Remove placeholders, whitespace, punctuation; keep letters/digits only.
+  return text
+    .replace(/__BF_KEEP_\d+__/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "")
+    .trim();
+}
+
+function isWhichOfTheFollowingProperNounQuestion(q: string): boolean {
+  const t = q.toLowerCase().trim().replace(/\s+/g, " ");
+  if (!t) return false;
+  const lead = t.includes("which of the following") || t.includes("which of these");
+  if (!lead) return false;
+
+  const keywords = [
+    "character",
+    "title",
+    "album",
+    "song",
+    "track",
+    "studio",
+    "company",
+    "country",
+    "city",
+    "name",
+    "video game",
+    "game",
+    "rapper",
+    "band",
+    "artist",
+  ];
+  return keywords.some((k) => t.includes(k));
+}
+
+// Mixed-mode (question only) for character/name MC questions.
+// Keep answers unchanged to protect proper nouns.
+//
+// Tests (curl against wrangler dev):
+// - Destiny character (answers must remain identical):
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Which of the following characters is from the video game Destiny?","Cayde-6","Geralt of Rivia","Master Chief","Lara Croft"]}'
+// Expect: mode=mixed_answers, answers unchanged
+//
+// - Proper noun phrases should stay intact under full-translate (placeholder protection):
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Ostrava of Boletaria is a character from which game?","Demon\'s Souls","Dark Souls","Bloodborne"]}'
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Mordecai the Hunter is a character from which game?","Borderlands","Destiny","Halo"]}'
+function isCharacterAnswersPassthroughQuestion(q: string): boolean {
+  const qRaw = q ?? "";
+  const t = qRaw.toLowerCase().trim().replace(/\s+/g, " ");
+  if (!t) return false;
+
+  // Trigger (robust, not too broad):
+  // - contains "which of the following"
+  // - contains "character" or "characters"
+  // - contains "from" OR "video game" OR "game"
+  const lead = t.includes("which of the following");
+  if (!lead) return false;
+
+  const hasCharacter = t.includes("character") || t.includes("characters");
+  if (!hasCharacter) return false;
+
+  const hasFromOrGame = t.includes("from") || t.includes("video game") || t.includes("game");
+  return hasFromOrGame;
+}
+
+// --- Template-based mixed-mode (question only; answers untouched) ---
+//
+// Goal: avoid translating proper-noun answers (e.g. "Glass" -> "Glas") by translating ONLY the question,
+// and for EN<->DE build a clean template without a Google call.
+//
+// Manual curl tests (run against wrangler dev; answers must remain unchanged):
+// 1) City (EN -> DE) "Mirror’s Edge Catalyst"
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Mirror’s Edge Catalyst is set in which city?","Glass","The City","New Eden","Downtown"]}'
+//
+// 2) Studio (EN -> DE) "Cowboy Bebop"
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Which studio produced Cowboy Bebop?","Bones","Madhouse","Pierrot","Sunrise"]}'
+//
+// 3) Company (EN -> DE) "Minecraft"
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Which company developed Minecraft?","Mojang","Nintendo","Sony"]}'
+//
+// 4) Country (EN -> DE) "Nintendo"
+// curl -sS -X POST http://localhost:8787/translateBatch -H 'Content-Type: application/json' -H 'x-debug: 1' --data '{"target":"de","source":"en","texts":["Which country is Nintendo from?","Japan","USA","Germany"]}'
+type TemplateType = "city" | "studio" | "company" | "country";
+
+function normalizeForMatching(input: string): string {
+  return input.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function stripOuterQuotes(s: string): string {
+  let out = s.trim();
+  // strip a single pair of common quotes
+  const pairs: Array<[string, string]> = [
+    ['"', '"'],
+    ["'", "'"],
+    ["“", "”"],
+    ["‘", "’"],
+    ["«", "»"],
+    ["„", "“"],
+  ];
+  for (const [l, r] of pairs) {
+    if (out.startsWith(l) && out.endsWith(r) && out.length >= 2) {
+      out = out.slice(1, -1).trim();
+      break;
+    }
+  }
+  return out;
+}
+
+function stripEdgeQuotes(s: string): string {
+  // Removes leading/trailing quote characters even if unpaired (common with pasted smart-quotes).
+  let out = s.trim();
+  const edge = /^[\"'“”‘’«»„]+|[\"'“”‘’«»„]+$/g;
+  for (let i = 0; i < 3; i++) {
+    const next = out.replace(edge, "").trim();
+    if (next === out) break;
+    out = next;
+  }
+  return out;
+}
+
+function detectCityEntity(q: string): string | null {
+  const qTrim = q.trim();
+  if (!qTrim) return null;
+  const qNorm = qTrim.toLowerCase().replace(/\s+/g, " ");
+
+  // Match against normalized string (as requested).
+  const patterns = [
+    /^(.+?)\s+is\s+set\s+in\s+which\s+city\??$/i, // A
+    /^(.+?)\s+is\s+set\s+in\s+what\s+city\??$/i, // B
+    /^in\s+which\s+city\s+is\s+(.+?)\s+set\??$/i, // C
+    /^which\s+city\s+is\s+(.+?)\s+set\s+in\??$/i, // D
+  ];
+
+  for (const re of patterns) {
+    if (!qNorm.match(re)) continue;
+    // Re-run the same regex on the original string to extract the true substring.
+    const qOrig = qTrim.replace(/\s+/g, " ");
+    const m = qOrig.match(re);
+    if (!m) continue;
+    const entityRaw = (m[1] ?? "").trim();
+    const entity = stripEdgeQuotes(stripOuterQuotes(entityRaw));
+    if (!entity) return null;
+    return entity;
+  }
+
+  return null;
+}
+
+function detectTemplateQuestion(q: string): null | { type: TemplateType; entity: string } {
+  const qTrim = q.trim();
+  if (!qTrim) return null;
+
+  // Normalize only for matching (keep original for entity extraction).
+  // Note: requests may include “smart quotes” around the whole question, e.g. “...?”.
+  const qNorm = qTrim.toLowerCase().replace(/\s+/g, " ");
+
+  const qNormMatch = stripEdgeQuotes(qNorm);
+  const qTrimMatch = stripEdgeQuotes(qTrim.replace(/\s+/g, " "));
+
+  // Patterns are intentionally conservative; if unsure -> null (fallback to normal flow).
+  const patterns: Array<{ type: TemplateType; re: RegExp; entityGroup: number }> = [
+    // CITY (EN)
+    // Explicit variants requested (A-D); entity group is the captured title.
+    { type: "city", re: /^(.+?)\s+is\s+set\s+in\s+which\s+city\??$/i, entityGroup: 1 }, // A
+    { type: "city", re: /^(.+?)\s+is\s+set\s+in\s+what\s+city\??$/i, entityGroup: 1 }, // B
+    { type: "city", re: /^in\s+which\s+city\s+is\s+(.+?)\s+set\??$/i, entityGroup: 1 }, // C
+    { type: "city", re: /^which\s+city\s+is\s+(.+?)\s+set\s+in\??$/i, entityGroup: 1 }, // D
+    // Extra: past tense variant (kept)
+    { type: "city", re: /^(.+?)\s+was\s+set\s+in\s+(?:which|what)\s+city\??$/i, entityGroup: 1 },
+    { type: "city", re: /^(.+?)\s+(?:takes|took)\s+place\s+in\s+(?:which|what)\s+city\??$/i, entityGroup: 1 },
+    { type: "city", re: /^where\s+does\s+(.+?)\s+take\s+place\??$/i, entityGroup: 1 },
+    // STUDIO (EN)
+    { type: "studio", re: /^which\s+studio\s+(?:produced|made|animated)\s+(.+?)\??$/i, entityGroup: 1 },
+    { type: "studio", re: /^(.+?)\s+was\s+produced\s+by\s+which\s+studio\??$/i, entityGroup: 1 },
+    // COMPANY (EN)
+    { type: "company", re: /^which\s+company\s+(?:developed|made|created)\s+(.+?)\??$/i, entityGroup: 1 },
+    { type: "company", re: /^(.+?)\s+was\s+(?:developed|made|created)\s+by\s+which\s+company\??$/i, entityGroup: 1 },
+    // COUNTRY (EN)
+    { type: "country", re: /^in\s+which\s+country\s+is\s+(.+?)\s+located\??$/i, entityGroup: 1 },
+    { type: "country", re: /^(.+?)\s+is\s+located\s+in\s+which\s+country\??$/i, entityGroup: 1 },
+    { type: "country", re: /^which\s+country\s+is\s+(.+?)\s+from\??$/i, entityGroup: 1 },
+  ];
+
+  // Quick prefilter to avoid running many regexes on unrelated questions.
+  if (
+    !(
+      qNormMatch.includes("which city") ||
+      qNormMatch.includes("what city") ||
+      qNormMatch.includes("take place") ||
+      qNormMatch.includes("is set") ||
+      qNormMatch.includes("which studio") ||
+      qNormMatch.includes("which company") ||
+      qNormMatch.includes("which country") ||
+      qNormMatch.includes("in which country") ||
+      qNormMatch.includes("located in")
+    )
+  ) {
+    return null;
+  }
+
+  for (const p of patterns) {
+    // Match on normalized string (robust whitespace / outer quotes),
+    // but extract entity from the original string (qTrim), not qNorm.
+    const normMatch = qNormMatch.match(p.re);
+    if (!normMatch) continue;
+
+    // Re-match on original (whitespace-collapsed) to get the real substring.
+    const origMatch = qTrimMatch.match(p.re);
+    if (!origMatch) continue;
+
+    const entityRaw = origMatch[p.entityGroup] ?? "";
+    const entity = stripOuterQuotes(entityRaw);
+    if (!entity) return null;
+    return { type: p.type, entity };
+  }
+
+  return null;
+}
+
+function modeForType(t: TemplateType): TranslateBatchResponse["mode"] {
+  switch (t) {
+    case "city":
+      return "mixed_city";
+    case "studio":
+      return "mixed_studio";
+    case "company":
+      return "mixed_company";
+    case "country":
+      return "mixed_country";
+  }
+}
+
+function primaryLang(code: string): string {
+  return code.trim().toLowerCase().replace(/_/g, "-").split("-")[0];
+}
+
+function buildLocalTemplate(type: TemplateType, entity: string, source: string, target: string): string | null {
+  const s = primaryLang(source);
+  const t = primaryLang(target);
+
+  // EN -> DE (zero Google calls)
+  if (s === "en" && t === "de") {
+    switch (type) {
+      case "city":
+        return `In welcher Stadt ist ${entity} angesiedelt?`;
+      case "studio":
+        return `Welches Studio produzierte ${entity}?`;
+      case "company":
+        return `Welche Firma entwickelte ${entity}?`;
+      case "country":
+        return `In welchem Land liegt ${entity}?`;
+    }
+  }
+
+  // DE -> EN (zero Google calls) - only when we are sure we matched an EN template question.
+  if (s === "de" && t === "en") {
+    switch (type) {
+      case "city":
+        return `In which city is ${entity} set?`;
+      case "studio":
+        return `Which studio produced ${entity}?`;
+      case "company":
+        return `Which company developed ${entity}?`;
+      case "country":
+        return `In which country is ${entity} located?`;
+    }
+  }
+
+  return null;
+}
+
+function buildEnglishBaseTemplate(type: TemplateType, entityPlaceholder: string): string {
+  switch (type) {
+    case "city":
+      return `${entityPlaceholder} is set in which city?`;
+    case "studio":
+      return `Which studio produced ${entityPlaceholder}?`;
+    case "company":
+      return `Which company developed ${entityPlaceholder}?`;
+    case "country":
+      return `In which country is ${entityPlaceholder} located?`;
+  }
+}
+
 async function translateWithGoogleV2(params: Required<TranslateBatchRequest>, apiKey: string): Promise<string[]> {
   const url = new URL("https://translation.googleapis.com/language/translate/v2");
   url.searchParams.set("key", apiKey);
@@ -130,6 +557,11 @@ async function translateWithGoogleV2(params: Required<TranslateBatchRequest>, ap
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const debug = wantsDebug(request);
+    const debugBuild = "bf-dev-answers-v1";
+
+    const withBuild = (resp: TranslateBatchResponse): TranslateBatchResponse =>
+      debug ? { ...resp, build: debugBuild } : resp;
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204 });
@@ -161,8 +593,102 @@ export default {
       return serverError("Missing GOOGLE_API_KEY secret.");
     }
 
+    // Special case (B): "stand for / wofür steht" + acronym => mixed translation
+    // - Translate only the fixed phrase/template (smallest possible), keep answers original.
+    try {
+      const question = params.texts[0] ?? "";
+      if (question && isStandForQuestion(question) && hasAnyAcronym(question)) {
+        const acronym = extractFirstAcronym(question);
+        if (acronym) {
+          const canonical = buildCanonicalStandForQuestion(acronym, params.target);
+
+          // For DE/EN we can avoid Google entirely (zero cost).
+          const t = params.target.split("_")[0].toLowerCase().trim();
+          let mixedQuestion = canonical;
+          if (t !== "de" && t !== "en") {
+            // Tiny call: translate the canonical English template, keeping the acronym protected.
+            const counter = { value: 1 };
+            const protectedQ = applyProtection(canonical, counter);
+            const tiny = await translateWithGoogleV2(
+              { target: params.target, source: params.source, texts: [protectedQ.text] },
+              env.GOOGLE_API_KEY,
+            );
+            if (Array.isArray(tiny) && typeof tiny[0] === "string" && tiny[0].length > 0) {
+              mixedQuestion = restoreProtection(tiny[0], protectedQ.replacements);
+            } else {
+              // If unsure, fall back to the original question (never crash).
+              mixedQuestion = question;
+            }
+          }
+
+          const translated = [mixedQuestion, ...params.texts.slice(1)];
+          const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed" } : { translated };
+          return json(withBuild(resp), { status: 200 });
+        }
+      }
+    } catch {
+      // If anything goes wrong, continue with normal translation flow.
+    }
+
+    // Bulletproof City template (EN -> DE): MUST run before cache/full-translate.
+    // Only translate the question via fixed template; keep answers original; zero Google calls.
+    try {
+      const t = primaryLang(params.target);
+      const s = primaryLang(params.source);
+      if (t === "de" && s === "en") {
+        const q0 = params.texts[0] ?? "";
+        const entity = q0 ? detectCityEntity(q0) : null;
+        if (entity) {
+          const translatedQuestion = `In welcher Stadt ist ${entity} angesiedelt?`;
+          const translated = [translatedQuestion, ...params.texts.slice(1)];
+          const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed_city" } : { translated };
+          return json(withBuild(resp), { status: 200 });
+        }
+      }
+    } catch {
+      // Never crash; fall through to normal flow.
+    }
+
+    // NEW SPECIAL MODE: mixed_answers for “Which of the following … character … (video) game …”
+    // Must run before cache + before any full-translate path.
+    // - Translate ONLY the question (1 Google call, keep-token protection applies)
+    // - Keep answers 1:1 original
+    try {
+      const texts = params.texts;
+      const qRaw = String(texts[0] ?? "");
+      const q = qRaw.toLowerCase().replace(/\s+/g, " ").trim();
+      const isWhichOfFollowing = q.includes("which of the following");
+      const isCharacterQuestion = q.includes("character");
+      const mentionsGame = q.includes("video game") || q.includes(" game") || q.includes("from");
+
+      if (texts.length >= 4 && qRaw && isWhichOfFollowing && isCharacterQuestion && mentionsGame) {
+        let translatedQuestion = qRaw;
+        try {
+          const counter = { value: 1 };
+          const protectedQ = applyProtection(qRaw, counter);
+          const tiny = await translateWithGoogleV2(
+            { target: params.target, source: params.source, texts: [protectedQ.text] },
+            env.GOOGLE_API_KEY,
+          );
+          if (Array.isArray(tiny) && typeof tiny[0] === "string" && tiny[0].length > 0) {
+            translatedQuestion = restoreProtection(tiny[0], protectedQ.replacements);
+          }
+        } catch {
+          translatedQuestion = qRaw;
+        }
+
+        const translated = [translatedQuestion, ...texts.slice(1)];
+        const resp: TranslateBatchResponse = debug
+          ? { translated, mode: "mixed_answers", rule: "mixed_answers_character" }
+          : { translated };
+        return json(withBuild(resp), { status: 200 });
+      }
+    } catch {
+      // Never crash; fall through to normal flow.
+    }
+
     // Optional KV cache
-    const cacheKeyInput = `${params.target}\n${params.texts.join("\n")}`;
+    const cacheKeyInput = `${params.target}\n${params.source}\n${params.texts.join("\n")}`;
     const cacheKey = await sha256Hex(cacheKeyInput);
 
     if (env.TRANSLATION_CACHE) {
@@ -171,8 +697,8 @@ export default {
         try {
           const parsed = JSON.parse(cached);
           if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
-            const resp: TranslateBatchResponse = { translated: parsed };
-            return json(resp, { status: 200 });
+            const resp: TranslateBatchResponse = debug ? { translated: parsed, mode: "full" } : { translated: parsed };
+            return json(withBuild(resp), { status: 200 });
           }
         } catch {
           // ignore cache corruption and continue
@@ -181,10 +707,111 @@ export default {
     }
 
     try {
-      const translated = await translateWithGoogleV2(params, env.GOOGLE_API_KEY);
-      if (!Array.isArray(translated) || translated.length !== params.texts.length) {
+      // Protect (A): acronyms / name sequences via placeholders.
+      const counter = { value: 1 };
+      const protectedPerText: ProtectedResult[] = params.texts.map((t) => applyProtection(t, counter));
+      const protectedTexts = protectedPerText.map((x) => x.text);
+
+      // Cost brake (C): if there's essentially nothing translatable, skip Google entirely.
+      const hasSignal = protectedTexts.some((t) => stripToTranslatableSignal(t).length > 0);
+      if (!hasSignal) {
+        const translated = params.texts.slice();
+        if (env.TRANSLATION_CACHE) {
+          await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(translated), {
+            expirationTtl: 60 * 60 * 24 * 30,
+          });
+        }
+        const resp: TranslateBatchResponse = debug ? { translated, mode: "skip" } : { translated };
+        return json(withBuild(resp), { status: 200 });
+      }
+
+      // Mixed-mode: MC questions about identity/proper nouns.
+      // Translate ONLY the question; keep answers exactly as provided.
+      const mcQuestion = params.texts[0] ?? "";
+      if (mcQuestion && isWhichOfTheFollowingProperNounQuestion(mcQuestion)) {
+        let translatedQuestion = mcQuestion;
+        try {
+          const protectedQ = protectedTexts[0] ?? mcQuestion;
+          const tiny = await translateWithGoogleV2(
+            { target: params.target, source: params.source, texts: [protectedQ] },
+            env.GOOGLE_API_KEY,
+          );
+          if (Array.isArray(tiny) && typeof tiny[0] === "string" && tiny[0].length > 0) {
+            const rep = protectedPerText[0]?.replacements ?? new Map();
+            translatedQuestion = restoreProtection(tiny[0], rep);
+          }
+        } catch {
+          translatedQuestion = mcQuestion;
+        }
+
+        const translated = [translatedQuestion, ...params.texts.slice(1)];
+        if (env.TRANSLATION_CACHE) {
+          await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(translated), {
+            expirationTtl: 60 * 60 * 24 * 30,
+          });
+        }
+        const resp: TranslateBatchResponse = debug ? { translated, mode: "mixed_keep_answers" } : { translated };
+        return json(withBuild(resp), { status: 200 });
+      }
+
+      // Template-based mixed-mode: translate ONLY the question; answers are proper nouns and must stay as-is.
+      const questionOriginal = params.texts[0] ?? "";
+      const detected = questionOriginal ? detectTemplateQuestion(questionOriginal) : null;
+      if (questionOriginal && detected) {
+        const { type, entity } = detected;
+        const local = buildLocalTemplate(type, entity, params.source, params.target);
+        let newQuestion = local ?? questionOriginal;
+
+        // For non-EN<->DE targets: translate a stable English base template with an entity placeholder,
+        // then restore the entity (no answer translation; exactly 1 mini-call).
+        if (!local) {
+          const entityToken = "__bf_entity__";
+          const base = buildEnglishBaseTemplate(type, entityToken);
+          try {
+            const tiny = await translateWithGoogleV2(
+              { target: params.target, source: "en", texts: [base] },
+              env.GOOGLE_API_KEY,
+            );
+            if (Array.isArray(tiny) && typeof tiny[0] === "string" && tiny[0].length > 0) {
+              const out = tiny[0];
+              if (out.includes(entityToken)) {
+                newQuestion = out.split(entityToken).join(entity);
+              } else {
+                // If placeholder got altered, keep original question to avoid nonsense.
+                newQuestion = questionOriginal;
+              }
+            } else {
+              newQuestion = questionOriginal;
+            }
+          } catch {
+            newQuestion = questionOriginal;
+          }
+        }
+
+        const translated = [newQuestion, ...params.texts.slice(1)];
+        if (env.TRANSLATION_CACHE) {
+          await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(translated), {
+            expirationTtl: 60 * 60 * 24 * 30,
+          });
+        }
+        const mode = modeForType(type);
+        const resp: TranslateBatchResponse = debug ? { translated, mode } : { translated };
+        return json(withBuild(resp), { status: 200 });
+      }
+
+      const translatedRaw = await translateWithGoogleV2(
+        { target: params.target, source: params.source, texts: protectedTexts },
+        env.GOOGLE_API_KEY,
+      );
+      if (!Array.isArray(translatedRaw) || translatedRaw.length !== params.texts.length) {
         return serverError("Google Translate returned unexpected result length.");
       }
+
+      // Restore placeholders
+      const translated = translatedRaw.map((t, i) => {
+        const rep = protectedPerText[i]?.replacements ?? new Map();
+        return restoreProtection(typeof t === "string" ? t : "", rep);
+      });
 
       if (env.TRANSLATION_CACHE) {
         await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(translated), {
@@ -193,8 +820,8 @@ export default {
         });
       }
 
-      const resp: TranslateBatchResponse = { translated };
-      return json(resp, { status: 200 });
+      const resp: TranslateBatchResponse = debug ? { translated, mode: "full" } : { translated };
+      return json(withBuild(resp), { status: 200 });
     } catch (e: any) {
       return serverError(e?.message ? String(e.message) : "Translation failed.");
     }
