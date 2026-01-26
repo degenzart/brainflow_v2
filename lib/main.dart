@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
@@ -1269,13 +1270,20 @@ class _FlowView extends StatefulWidget {
   State<_FlowView> createState() => _FlowViewState();
 }
 
-class _FlowViewState extends State<_FlowView> {
+class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixin {
   late final PageController _controller;
+  late final AnimationController _cardScaleController;
+  late final Animation<double> _cardScaleAnimation;
   Timer? _feedbackTimer;
   int _currentIndex = 0;
+  String? _previousCardId; // Track card ID for animation trigger
   bool _answerLocked = false;
   _FlowFeedback _feedback = _FlowFeedback.none;
   int _feedbackSeed = 0;
+  // Answer feedback state (for current card)
+  String? _selectedAnswer; // null = not answered yet
+  bool _isAnswered = false; // Whether an answer was selected
+  bool _isCorrectlyAnswered = false; // Whether the selected answer was correct
   double _dragDx = 0.0;
   double _dragDy = 0.0;
   bool _swipeConsumed = false;
@@ -1285,11 +1293,25 @@ class _FlowViewState extends State<_FlowView> {
   void initState() {
     super.initState();
     _controller = PageController();
+    // Card scale-in animation (0.98 → 1.00)
+    _cardScaleController = AnimationController(
+      duration: const Duration(milliseconds: 200), // Within 160-220ms range
+      vsync: this,
+    );
+    _cardScaleAnimation = Tween<double>(begin: 0.98, end: 1.0).animate(
+      CurvedAnimation(
+        parent: _cardScaleController,
+        curve: Curves.easeOutCubic,
+      ),
+    );
+    // Start initial animation
+    _cardScaleController.forward();
   }
 
   @override
   void dispose() {
     _feedbackTimer?.cancel();
+    _cardScaleController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -1336,7 +1358,17 @@ class _FlowViewState extends State<_FlowView> {
     _answerLocked = true;
 
     final isCorrect = answer == card.correctAnswer;
-    if (!mounted) return;
+    if (!mounted) {
+      _answerLocked = false;
+      return;
+    }
+    
+    // Update answer feedback state (ALWAYS set, even if comparison fails)
+    setState(() {
+      _selectedAnswer = answer;
+      _isAnswered = true;
+      _isCorrectlyAnswered = isCorrect;
+    });
 
     // Calculate firework origin from button position relative to card stack
     Offset? origin;
@@ -1404,11 +1436,25 @@ class _FlowViewState extends State<_FlowView> {
       onPageChanged: (i) {
         // Handle endless flow: wrap around using modulo
         final actualIndex = i % widget.cards.length;
+        final currentCard = widget.cards[actualIndex];
+        final currentCardId = currentCard.id;
+        
+        // Trigger scale-in animation if card ID changed
+        if (currentCardId != _previousCardId) {
+          _cardScaleController.reset();
+          _cardScaleController.forward();
+        }
+        
         setState(() {
           _currentIndex = actualIndex;
+          _previousCardId = currentCardId;
           _answerLocked = false;
           _feedback = _FlowFeedback.none;
           _swipeConsumed = false;
+          // Reset answer feedback state for new card
+          _selectedAnswer = null;
+          _isAnswered = false;
+          _isCorrectlyAnswered = false;
         });
         
         // Check if we need to download more cards (placeholder)
@@ -1453,11 +1499,11 @@ class _FlowViewState extends State<_FlowView> {
                     _swipeConsumed = true;
                     if (_dragDx > 0) {
                       // Swipe nach rechts → Like
-                      _showFeedback(_FlowFeedback.like);
+                      _showFeedback(_FlowFeedback.like, millis: 660); // +400ms longer
                       return;
                     } else {
                       // Swipe nach links → Dislike
-                      _showFeedback(_FlowFeedback.dislike);
+                      _showFeedback(_FlowFeedback.dislike, millis: 660); // +400ms longer
                       return;
                     }
                   }
@@ -1465,40 +1511,48 @@ class _FlowViewState extends State<_FlowView> {
                 child: Stack(
                   key: cardStackKey,
                   children: [
-                    Card(
-                      margin: EdgeInsets.zero,
-                      elevation: 0,
-                      color: Theme.of(context)
-                          .colorScheme
-                          .surfaceContainerHighest
-                          .withValues(alpha: 0.72),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                        side: BorderSide(
-                          color: style.color.withValues(alpha: 0.70),
-                          width: 1.2,
+                    // Scale-in animation wrapper (only for active card)
+                    ScaleTransition(
+                      scale: isActive ? _cardScaleAnimation : const AlwaysStoppedAnimation(1.0),
+                      child: Card(
+                        margin: EdgeInsets.zero,
+                        elevation: 0,
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHighest
+                            .withValues(alpha: 0.72),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                          side: BorderSide(
+                            color: style.color.withValues(alpha: 0.70),
+                            width: 1.2,
+                          ),
                         ),
-                      ),
-                      child: Padding(
-                        padding: const EdgeInsets.all(14),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            _FlowTopRow(
-                              card: card,
-                              onReport: () => widget.onReport(card),
-                            ),
-                            const SizedBox(height: 12),
-                            Expanded(
-                              child: _FlowCard(
+                        child: Padding(
+                          padding: const EdgeInsets.all(14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _FlowTopRow(
                                 card: card,
-                                style: style,
-                                locked: _answerLocked && isActive,
-                                onAnswer: (a, context) => _handleAnswer(card, a, context, cardStackKey),
+                                onReport: () => widget.onReport(card),
                               ),
-                            ),
-                            const SizedBox(height: 8),
-                          ],
+                              const SizedBox(height: 12),
+                              Expanded(
+                                child: _FlowCard(
+                                  card: card,
+                                  style: style,
+                                  locked: _answerLocked && isActive,
+                                  onAnswer: (a, context) => _handleAnswer(card, a, context, cardStackKey),
+                                  // Answer feedback state (only for active card)
+                                  isAnswered: isActive ? _isAnswered : false,
+                                  selectedAnswer: isActive ? _selectedAnswer : null,
+                                  isCorrectlyAnswered: isActive ? _isCorrectlyAnswered : false,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -1641,11 +1695,17 @@ class _FlowCard extends StatelessWidget {
     required this.style,
     required this.onAnswer,
     required this.locked,
+    required this.isAnswered,
+    required this.selectedAnswer,
+    required this.isCorrectlyAnswered,
   });
   final CardModel card;
   final _CategoryStyle style;
   final void Function(String, BuildContext?) onAnswer;
   final bool locked;
+  final bool isAnswered;
+  final String? selectedAnswer;
+  final bool isCorrectlyAnswered;
 
   @override
   Widget build(BuildContext context) {
@@ -1704,6 +1764,9 @@ class _FlowCard extends StatelessWidget {
             correctAnswer: card.correctAnswer,
             locked: locked,
             onAnswer: onAnswer,
+            isAnswered: isAnswered,
+            selectedAnswer: selectedAnswer,
+            isCorrectlyAnswered: isCorrectlyAnswered,
           ),
         ),
       ],
@@ -1819,12 +1882,18 @@ class _AnswerGrid extends StatelessWidget {
     required this.correctAnswer,
     required this.locked,
     required this.onAnswer,
+    required this.isAnswered,
+    required this.selectedAnswer,
+    required this.isCorrectlyAnswered,
   });
 
   final List<String> answers;
   final String correctAnswer;
   final bool locked;
   final void Function(String, BuildContext?) onAnswer;
+  final bool isAnswered;
+  final String? selectedAnswer;
+  final bool isCorrectlyAnswered;
 
   @override
   Widget build(BuildContext context) {
@@ -1845,12 +1914,32 @@ class _AnswerGrid extends StatelessWidget {
     Widget button(int idx, BuildContext gridContext) {
       final label = normalized[idx];
       final color = palette[idx];
+      final isCorrect = label == correctAnswer;
+      final isSelected = label == selectedAnswer;
+      
+      // Determine button state based on answer feedback rules
+      bool shouldHighlight = false;
+      bool shouldDim = false;
+      
+      if (isAnswered) {
+        if (isCorrectlyAnswered) {
+          // If answered correctly: only correct button is highlighted, others dimmed
+          shouldHighlight = isCorrect;
+          shouldDim = !isCorrect;
+        } else {
+          // If answered incorrectly: all buttons dimmed (no highlight)
+          shouldDim = true;
+        }
+      }
+      
       return Builder(
         builder: (buttonContext) => _AnswerButton(
           label: label,
           borderColor: color,
           enabled: !locked && label.isNotEmpty,
           onTap: () => onAnswer(label, buttonContext),
+          shouldHighlight: shouldHighlight,
+          shouldDim: shouldDim,
         ),
       );
     }
@@ -1878,12 +1967,16 @@ class _AnswerButton extends StatefulWidget {
     required this.borderColor,
     required this.enabled,
     required this.onTap,
+    this.shouldHighlight = false,
+    this.shouldDim = false,
   });
 
   final String label;
   final Color borderColor;
   final bool enabled;
   final VoidCallback onTap;
+  final bool shouldHighlight;
+  final bool shouldDim;
 
   @override
   State<_AnswerButton> createState() => _AnswerButtonState();
@@ -1916,28 +2009,55 @@ class _AnswerButtonState extends State<_AnswerButton> {
             onTapDown: widget.enabled ? (_) => setState(() => _pressed = true) : null,
             onTapCancel: widget.enabled ? () => setState(() => _pressed = false) : null,
             onTapUp: widget.enabled ? (_) => setState(() => _pressed = false) : null,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: widget.borderColor.withValues(alpha: widget.enabled ? 0.95 : 0.35),
-                  width: 1.6,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(14),
+              child: BackdropFilter(
+                filter: ImageFilter.blur(
+                  sigmaX: widget.shouldDim ? 2.5 : 0.0,
+                  sigmaY: widget.shouldDim ? 2.5 : 0.0,
                 ),
-              ),
-              child: Center(
-                child: Text(
-                  widget.label,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        fontSize: 16.8, // 14 * 1.2 (20% größer)
-                        fontWeight: FontWeight.w700,
-                        color: widget.enabled
-                            ? Theme.of(context).colorScheme.onSurface
-                            : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.45),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: widget.borderColor.withValues(
+                        alpha: widget.shouldDim
+                            ? 0.25
+                            : (widget.shouldHighlight ? 1.0 : (widget.enabled ? 0.95 : 0.35)),
                       ),
+                      width: widget.shouldHighlight ? 2.2 : 1.6,
+                    ),
+                    color: widget.shouldDim
+                        ? Colors.black.withValues(alpha: 0.15)
+                        : Colors.transparent,
+                    boxShadow: widget.shouldHighlight
+                        ? [
+                            BoxShadow(
+                              color: widget.borderColor.withValues(alpha: 0.4),
+                              blurRadius: 8,
+                              spreadRadius: 0,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: Center(
+                    child: Text(
+                      widget.label,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            fontSize: 16.8, // 14 * 1.2 (20% größer)
+                            fontWeight: FontWeight.w700,
+                            color: widget.shouldDim
+                                ? Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.30)
+                                : (widget.enabled
+                                    ? Theme.of(context).colorScheme.onSurface
+                                    : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.45)),
+                          ),
+                    ),
+                  ),
                 ),
               ),
             ),

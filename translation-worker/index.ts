@@ -85,12 +85,110 @@ async function sha256Hex(input: string): Promise<string> {
   return hex;
 }
 
+// Protection system for proper nouns (band names, album titles, track titles, etc.)
+interface ProtectionResult {
+  text: string;
+  replacements: Array<{ token: string; original: string }>;
+}
+
+function applyProtection(text: string, counter: { value: number }): ProtectionResult {
+  const replacements: Array<{ token: string; original: string }> = [];
+  let protected = text;
+  let tokenIndex = counter.value;
+
+  // Pattern 1: Quoted titles (e.g., "Nine Inch Nails", "A Warm Place")
+  protected = protected.replace(/"([^"]+)"/g, (match, content) => {
+    const token = `__PROTECT_${tokenIndex++}__`;
+    replacements.push({ token, original: match });
+    return token;
+  });
+
+  // Pattern 2: TitleCase sequences (likely proper nouns: Band/Album/Track names)
+  // Matches sequences like "Nine Inch Nails", "The Downward Spiral", "A Warm Place"
+  // Must be 2+ words, each starting with uppercase, no lowercase-only words
+  protected = protected.replace(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b)/g, (match) => {
+    // Skip if it's a common word pattern or too short
+    if (match.split(/\s+/).length < 2) return match;
+    // Skip common words that shouldn't be protected
+    const commonWords = /\b(The|A|An|Of|In|On|At|To|For|With|By)\b/i;
+    if (commonWords.test(match) && match.split(/\s+/).length === 2) return match;
+    
+    const token = `__PROTECT_${tokenIndex++}__`;
+    replacements.push({ token, original: match });
+    return token;
+  });
+
+  // Pattern 3: Known band/album/track indicators followed by TitleCase
+  // e.g., "album Nine Inch Nails", "track A Warm Place"
+  protected = protected.replace(/\b(album|track|song|band|artist|title|film|movie|game)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi, (match, indicator, title) => {
+    const token = `__PROTECT_${tokenIndex++}__`;
+    replacements.push({ token, original: title });
+    return indicator + " " + token;
+  });
+
+  counter.value = tokenIndex;
+  return { text: protected, replacements };
+}
+
+function restoreProtection(text: string, replacements: Array<{ token: string; original: string }>): string {
+  let restored = text;
+  // Restore in reverse order to avoid token collisions
+  for (let i = replacements.length - 1; i >= 0; i--) {
+    const { token, original } = replacements[i];
+    restored = restored.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), original);
+  }
+  return restored;
+}
+
+// Post-process German questions: ensure "Which ..." becomes "Welches/Welche/Welcher ..."
+function postProcessGermanQuestion(question: string, originalQuestion: string): string {
+  // Check if original starts with "Which"
+  if (!/^Which\s+/i.test(originalQuestion)) {
+    return question;
+  }
+
+  // If German translation doesn't start with interrogative, fix it
+  if (!/^(Welches?|Welcher|Welche|Was|Wo|Wann|Wie|Warum)\s+/i.test(question)) {
+    // Try to detect gender/number from context
+    const lowerQuestion = question.toLowerCase();
+    let interrogative = "Welches";
+    
+    // Heuristic: check for common patterns
+    if (/\b(das|der|die)\s+/i.test(question)) {
+      const article = question.match(/\b(das|der|die)\s+/i)?.[1]?.toLowerCase();
+      if (article === "der") interrogative = "Welcher";
+      else if (article === "die") interrogative = "Welche";
+    }
+    
+    // Replace "Das/Der/Die ..." with interrogative
+    question = question.replace(/^(Das|Der|Die)\s+/i, `${interrogative} `);
+  }
+
+  // Ensure question mark at the end
+  if (!question.trim().endsWith("?")) {
+    question = question.trim() + "?";
+  }
+
+  return question;
+}
+
 async function translateWithGoogleV2(params: Required<TranslateBatchRequest>, apiKey: string): Promise<string[]> {
+  // Apply protection to all texts (question + answers)
+  const counter = { value: 0 };
+  const protectedTexts: string[] = [];
+  const allReplacements: Array<Array<{ token: string; original: string }>> = [];
+
+  for (const text of params.texts) {
+    const protected = applyProtection(text, counter);
+    protectedTexts.push(protected.text);
+    allReplacements.push(protected.replacements);
+  }
+
   const url = new URL("https://translation.googleapis.com/language/translate/v2");
   url.searchParams.set("key", apiKey);
 
   const payload: Record<string, unknown> = {
-    q: params.texts,
+    q: protectedTexts,
     source: params.source,
     target: params.target,
     format: "text",
@@ -119,7 +217,17 @@ async function translateWithGoogleV2(params: Required<TranslateBatchRequest>, ap
     throw new Error("Google Translate response missing data.translations.");
   }
 
-  const out: string[] = translations.map((t: any) => (typeof t?.translatedText === "string" ? t.translatedText : ""));
+  let out: string[] = translations.map((t: any, idx: number) => {
+    const translated = typeof t?.translatedText === "string" ? t.translatedText : "";
+    // Restore protected proper nouns
+    return restoreProtection(translated, allReplacements[idx] || []);
+  });
+
+  // Post-process German questions
+  if (params.target.toLowerCase() === "de" && out.length > 0) {
+    out[0] = postProcessGermanQuestion(out[0], params.texts[0]);
+  }
+
   if (out.length !== params.texts.length) {
     // Still return what we got, but it's suspicious.
     // Caller will validate length.
@@ -184,6 +292,40 @@ export default {
       const translated = await translateWithGoogleV2(params, env.GOOGLE_API_KEY);
       if (!Array.isArray(translated) || translated.length !== params.texts.length) {
         return serverError("Google Translate returned unexpected result length.");
+      }
+
+      // "All or Nothing" rule for answers: if answers are mixed, revert all to original
+      // Question (index 0) is always translated, answers (index 1+) must be consistent
+      if (translated.length > 1) {
+        const question = translated[0];
+        const originalAnswers = params.texts.slice(1);
+        const translatedAnswers = translated.slice(1);
+        
+        // Count how many answers changed
+        let diffCount = 0;
+        for (let i = 0; i < originalAnswers.length; i++) {
+          if (originalAnswers[i].trim() !== translatedAnswers[i].trim()) {
+            diffCount++;
+          }
+        }
+        
+        // If mixed (0 < diffCount < answersCount): revert all answers to original, keep question
+        if (diffCount > 0 && diffCount < originalAnswers.length) {
+          // Log would go here if we had logging infrastructure
+          // ANSWERS_PARTIAL_TRANSLATION_NORMALIZED: diffCount/originalAnswers.length action=kept_question_reverted_answers_to_original
+          
+          // Keep translated question, revert all answers to original
+          const normalized = [question, ...originalAnswers];
+          
+          if (env.TRANSLATION_CACHE) {
+            await env.TRANSLATION_CACHE.put(cacheKey, JSON.stringify(normalized), {
+              expirationTtl: 60 * 60 * 24 * 30,
+            });
+          }
+          
+          const resp: TranslateBatchResponse = { translated: normalized };
+          return json(resp, { status: 200 });
+        }
       }
 
       if (env.TRANSLATION_CACHE) {
