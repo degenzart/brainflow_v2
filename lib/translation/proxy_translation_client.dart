@@ -1,6 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show kDebugMode;
+
+import 'translation_batch_result.dart';
 import 'translation_client.dart';
 
 /// Minimal proxy client: always calls a fixed Worker base URL.
@@ -35,11 +38,11 @@ class ProxyTranslationClient implements TranslationClient {
       targetLang: targetLang,
       sourceLang: sourceLang,
     );
-    return out.isNotEmpty ? out.first : '';
+    return out.translated.isNotEmpty ? out.translated.first : '';
   }
 
   @override
-  Future<List<String>> translateBatch({
+  Future<TranslationBatchResult> translateBatch({
     required List<String> texts,
     required String targetLang,
     String sourceLang = 'auto',
@@ -53,6 +56,9 @@ class ProxyTranslationClient implements TranslationClient {
       final req = await client.postUrl(uri);
       req.headers.contentType = ContentType.json;
       req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+      if (kDebugMode) {
+        req.headers.set('x-debug', '1');
+      }
 
       // Payload includes at minimum { target, texts }.
       // We also pass `source` to avoid unnecessary auto-detection where possible.
@@ -79,7 +85,14 @@ class ProxyTranslationClient implements TranslationClient {
         final arr = decoded['translated'];
         if (arr is List) {
           final out = arr.map((e) => e?.toString() ?? '').toList(growable: false);
-          if (out.length == texts.length) return out;
+          if (out.length == texts.length) {
+            return TranslationBatchResult(
+              translated: out,
+              mode: decoded['mode']?.toString(),
+              rule: decoded['rule']?.toString(),
+              build: decoded['build']?.toString(),
+            );
+          }
           throw FormatException(
             'Unexpected translated length ${out.length} (expected ${texts.length})',
           );

@@ -50,6 +50,7 @@ class CardModel {
     required this.createdAt,
     this.source,
     this.translations,
+    this.translationMeta,
   });
 
   final String id;
@@ -71,6 +72,11 @@ class CardModel {
   final DateTime createdAt;
   final String? source;
   final Map<String, CardText>? translations;
+  /// Translation debug metadata per target language.
+  ///
+  /// Example:
+  /// `translationMeta['de'] = { 'mode': 'mixed_city', 'rule': '...', 'build': 'bf-dev-answers-v1' }`
+  final Map<String, Map<String, String>>? translationMeta;
 
   static String _normalizeLanguageCode(Object? value) {
     final raw = (value is String ? value : '').trim().toLowerCase();
@@ -110,6 +116,7 @@ class CardModel {
       createdAt: createdAt,
       source: source,
       translations: translations,
+      translationMeta: translationMeta,
     );
   }
 
@@ -127,6 +134,7 @@ class CardModel {
       createdAt: createdAt,
       source: source,
       translations: translations,
+      translationMeta: translationMeta,
     );
   }
 
@@ -145,6 +153,7 @@ class CardModel {
           'translations': translations!.map(
             (key, value) => MapEntry(key, value.toMap()),
           ),
+        if (translationMeta != null) 'translationMeta': translationMeta,
       };
 
   static CardModel fromMap(Map<String, Object?> map) {
@@ -159,6 +168,30 @@ class CardModel {
       );
     }
 
+    Map<String, Map<String, String>>? translationMeta;
+    try {
+      final rawMeta = map['translationMeta'];
+      if (rawMeta is Map) {
+        final out = <String, Map<String, String>>{};
+        rawMeta.forEach((k, v) {
+          if (k is! String) return;
+          if (v is Map) {
+            final inner = <String, String>{};
+            v.forEach((ik, iv) {
+              if (ik is! String) return;
+              if (iv == null) return;
+              inner[ik] = iv.toString();
+            });
+            if (inner.isNotEmpty) out[k] = inner;
+          }
+        });
+        if (out.isNotEmpty) translationMeta = out;
+      }
+    } catch (_) {
+      // Never crash on meta parsing.
+      translationMeta = null;
+    }
+
     return CardModel(
       id: map['id'] as String,
       question: map['question'] as String,
@@ -171,6 +204,7 @@ class CardModel {
       createdAt: DateTime.parse(map['createdAt'] as String),
       source: map['source'] as String?,
       translations: translations,
+      translationMeta: translationMeta,
     );
   }
 

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -319,13 +319,36 @@ class _HomeScreenState extends State<HomeScreen> {
         final texts = <String>[card.question, ...card.answers];
 
         List<String> translated;
+        Map<String, Map<String, String>>? translationMetaForThisCard =
+            card.translationMeta;
         try {
           final sourceLangForWorker = normalizeSourceLangForWorker(card.sourceLanguage);
-          translated = await client.translateBatch(
+          final result = await client.translateBatch(
             texts: texts,
             targetLang: lang,
             sourceLang: sourceLangForWorker,
           );
+          translated = result.translated;
+
+          // Persist worker meta per language so we can overlay debug info later.
+          final metaEntry = <String, String>{
+            if (result.mode != null) 'mode': result.mode!,
+            if (result.rule != null) 'rule': result.rule!,
+            if (result.build != null) 'build': result.build!,
+          };
+
+          if (metaEntry.isNotEmpty) {
+            final mergedMeta = <String, Map<String, String>>{};
+            if (translationMetaForThisCard != null) {
+              mergedMeta.addAll(
+                translationMetaForThisCard!
+                    .map((k, v) => MapEntry(k, Map<String, String>.from(v))),
+              );
+            }
+            final existingLangMeta = mergedMeta[lang] ?? <String, String>{};
+            mergedMeta[lang] = <String, String>{...existingLangMeta, ...metaEntry};
+            translationMetaForThisCard = mergedMeta;
+          }
         } catch (_) {
           // Failsafe: do not persist on failure.
           updatedCards.add(card);
@@ -367,6 +390,7 @@ class _HomeScreenState extends State<HomeScreen> {
             createdAt: card.createdAt,
             source: card.source,
             translations: merged,
+            translationMeta: translationMetaForThisCard,
           ),
         );
 
@@ -1723,6 +1747,43 @@ class _FlowTopRow extends StatelessWidget {
     );
   }
 
+  Widget _debugTranslationPill(BuildContext context) {
+    if (!kDebugMode) return const SizedBox.shrink();
+
+    final cs = Theme.of(context).colorScheme;
+    final langKey = _normalizePrimaryLang(effectiveLanguageCode);
+    final meta = (langKey.isEmpty ? null : card.translationMeta?[langKey]) ?? const <String, String>{};
+
+    final text =
+        '${meta['mode'] ?? '-'} | ${meta['rule'] ?? '-'} | ${meta['build'] ?? '-'}';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: cs.surface.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.18),
+          width: 1,
+        ),
+      ),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 240),
+        child: Text(
+          text,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w600,
+            color: Colors.white.withValues(alpha: 0.85),
+            height: 1.15,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -1736,7 +1797,17 @@ class _FlowTopRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             const Spacer(),
-            _originPill(context),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _originPill(context),
+                if (kDebugMode) ...[
+                  const SizedBox(height: 4),
+                  _debugTranslationPill(context),
+                ],
+              ],
+            ),
             const SizedBox(width: 6),
             IconButton(
               tooltip: AppLocalizations.of(context)!.report_title,

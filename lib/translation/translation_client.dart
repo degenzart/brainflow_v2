@@ -1,3 +1,5 @@
+import 'translation_batch_result.dart';
+
 abstract class TranslationClient {
   /// Translates [text] into [targetLang].
   ///
@@ -12,7 +14,7 @@ abstract class TranslationClient {
   /// Translates a batch of texts into [targetLang] in one call.
   ///
   /// The returned list must have the same length and order as [texts].
-  Future<List<String>> translateBatch({
+  Future<TranslationBatchResult> translateBatch({
     required List<String> texts,
     required String targetLang,
     String sourceLang = 'auto',
