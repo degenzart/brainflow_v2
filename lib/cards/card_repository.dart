@@ -82,6 +82,7 @@ class CardRepository {
         createdAt: raw.createdAt,
         source: raw.source,
         translations: raw.translations, // Keep translations for future use
+        translationMeta: raw.translationMeta,
       );
     }
 
