@@ -1824,56 +1824,48 @@ class _FlowCard extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10),
-        Flexible(
-          // Slightly smaller question area; keep it readable but limit height
-          flex: 4,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 150),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: cs.surface.withValues(alpha: 0.45),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: style.color.withValues(alpha: 0.18),
-                  width: 1,
-                ),
+        // Question area with bounded height; non-flex so it doesn't eat all space
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 150),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: cs.surface.withValues(alpha: 0.45),
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: style.color.withValues(alpha: 0.18),
+                width: 1,
               ),
-              child: Center(
-                child: _AutoFitText(
-                  text: card.question,
-                  textAlign: TextAlign.center,
-                  // Limit max lines / font size so the question doesn't dominate
-                  maxLines: 5,
-                  minFontSize: 10.0,
-                  maxFontSize: 20.0,
-                  style: theme.textTheme.headlineSmall?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
+            ),
+            child: Center(
+              child: _AutoFitText(
+                text: card.question,
+                textAlign: TextAlign.center,
+                // Limit max lines / font size so the question doesn't dominate
+                maxLines: 5,
+                minFontSize: 10.0,
+                maxFontSize: 20.0,
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
                 ),
               ),
             ),
           ),
         ),
-        // meta section removed
-        const SizedBox(height: 8),
-        Expanded(
-          // Give answers a bit more vertical space for better tap targets
-          flex: 6,
-          child: _AnswerGrid(
-            answers: card.answers.take(4).toList(growable: false),
-            correctIndex: () {
-              final visibleAnswers =
-                  card.answers.take(4).toList(growable: false);
-              final idx = visibleAnswers.indexOf(card.correctAnswer);
-              return idx >= 0 ? idx : 0;
-            }(),
-            locked: locked,
-            onAnswer: onAnswer,
-            isAnswered: isAnswered,
-            selectedAnswer: selectedAnswer,
-            isCorrectlyAnswered: isCorrectlyAnswered,
-          ),
+        // Push answers to the bottom of the card regardless of question height
+        const Spacer(),
+        _AnswerGrid(
+          answers: card.answers.take(4).toList(growable: false),
+          correctIndex: () {
+            final visibleAnswers = card.answers.take(4).toList(growable: false);
+            final idx = visibleAnswers.indexOf(card.correctAnswer);
+            return idx >= 0 ? idx : 0;
+          }(),
+          locked: locked,
+          onAnswer: onAnswer,
+          isAnswered: isAnswered,
+          selectedAnswer: selectedAnswer,
+          isCorrectlyAnswered: isCorrectlyAnswered,
         ),
       ],
     );
@@ -2069,15 +2061,16 @@ class _AnswerGrid extends StatelessWidget {
 
     return Builder(
       builder: (gridContext) => Column(
+        mainAxisSize: MainAxisSize.min, // avoid trying to expand into unbounded height
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Expanded(child: button(0, gridContext)),
+          button(0, gridContext),
           const SizedBox(height: 6),
-          Expanded(child: button(1, gridContext)),
+          button(1, gridContext),
           const SizedBox(height: 6),
-          Expanded(child: button(2, gridContext)),
+          button(2, gridContext),
           const SizedBox(height: 6),
-          Expanded(child: button(3, gridContext)),
+          button(3, gridContext),
         ],
       ),
     );
