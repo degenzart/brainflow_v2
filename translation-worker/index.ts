@@ -93,11 +93,11 @@ interface ProtectionResult {
 
 function applyProtection(text: string, counter: { value: number }): ProtectionResult {
   const replacements: Array<{ token: string; original: string }> = [];
-  let protected = text;
+  let protectedText = text;
   let tokenIndex = counter.value;
 
   // Pattern 1: Quoted titles (e.g., "Nine Inch Nails", "A Warm Place")
-  protected = protected.replace(/"([^"]+)"/g, (match, content) => {
+  protectedText = protectedText.replace(/"([^"]+)"/g, (match, content) => {
     const token = `__PROTECT_${tokenIndex++}__`;
     replacements.push({ token, original: match });
     return token;
@@ -106,7 +106,7 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
   // Pattern 2: TitleCase sequences (likely proper nouns: Band/Album/Track names)
   // Matches sequences like "Nine Inch Nails", "The Downward Spiral", "A Warm Place"
   // Must be 2+ words, each starting with uppercase, no lowercase-only words
-  protected = protected.replace(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b)/g, (match) => {
+  protectedText = protectedText.replace(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+\b)/g, (match) => {
     // Skip if it's a common word pattern or too short
     if (match.split(/\s+/).length < 2) return match;
     // Skip common words that shouldn't be protected
@@ -120,14 +120,14 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
 
   // Pattern 3: Known band/album/track indicators followed by TitleCase
   // e.g., "album Nine Inch Nails", "track A Warm Place"
-  protected = protected.replace(/\b(album|track|song|band|artist|title|film|movie|game)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi, (match, indicator, title) => {
+  protectedText = protectedText.replace(/\b(album|track|song|band|artist|title|film|movie|game)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)/gi, (match, indicator, title) => {
     const token = `__PROTECT_${tokenIndex++}__`;
     replacements.push({ token, original: title });
     return indicator + " " + token;
   });
 
   counter.value = tokenIndex;
-  return { text: protected, replacements };
+  return { text: protectedText, replacements };
 }
 
 function restoreProtection(text: string, replacements: Array<{ token: string; original: string }>): string {
@@ -179,9 +179,9 @@ async function translateWithGoogleV2(params: Required<TranslateBatchRequest>, ap
   const allReplacements: Array<Array<{ token: string; original: string }>> = [];
 
   for (const text of params.texts) {
-    const protected = applyProtection(text, counter);
-    protectedTexts.push(protected.text);
-    allReplacements.push(protected.replacements);
+    const protectedResult = applyProtection(text, counter);
+    protectedTexts.push(protectedResult.text);
+    allReplacements.push(protectedResult.replacements);
   }
 
   const url = new URL("https://translation.googleapis.com/language/translate/v2");

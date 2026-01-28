@@ -14,6 +14,7 @@ class CardRepository {
   static const String _cardsKey = 'cards_v1';
   static const String _seedPersistedKey = 'seed_persisted_v1';
   static bool _didLogSourceLanguageStats = false;
+  static bool _didLogTranslationCoverage = false;
 
   final SharedPreferences _prefs;
 
@@ -58,6 +59,44 @@ class CardRepository {
           debugPrint(
             'SOURCE_LANGUAGE STATS: total=$total, en=$en, de=$de, es=$es, other=$other',
           );
+        } catch (_) {
+          // Never crash on debug stats.
+        }
+      }
+
+      if (!_didLogTranslationCoverage) {
+        _didLogTranslationCoverage = true;
+        try {
+          final total = cards.length;
+          const langs = <String>['de', 'es'];
+          for (final lang in langs) {
+            var hasMap = 0; // cards with any translations map
+            var hasLang = 0; // cards with translations[lang]
+            var okQ = 0; // translations[lang].question non-empty
+            var okA = 0; // translations[lang].answers length == original answers length
+
+            for (final c in cards) {
+              final tr = c.translations;
+              if (tr != null && tr.isNotEmpty) {
+                hasMap++;
+                final entry = tr[lang];
+                if (entry != null) {
+                  hasLang++;
+                  if (entry.question.trim().isNotEmpty) {
+                    okQ++;
+                  }
+                  if (entry.answers.length == c.answers.length) {
+                    okA++;
+                  }
+                }
+              }
+            }
+
+            debugPrint(
+              'TRANSLATION_COVERAGE: lang=$lang hasMap=$hasMap/$total '
+              'hasLang=$hasLang/$total okQ=$okQ/$total okA=$okA/$total',
+            );
+          }
         } catch (_) {
           // Never crash on debug stats.
         }

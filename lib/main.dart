@@ -3,17 +3,18 @@ import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/rendering.dart' show
-    debugPaintSizeEnabled,
-    debugPaintBaselinesEnabled,
-    debugPaintPointersEnabled,
-    debugPaintLayerBordersEnabled,
-    debugRepaintRainbowEnabled;
+import 'package:flutter/rendering.dart'
+    show
+        debugPaintSizeEnabled,
+        debugPaintBaselinesEnabled,
+        debugPaintPointersEnabled,
+        debugPaintLayerBordersEnabled,
+        debugRepaintRainbowEnabled;
 
 import 'l10n/app_localizations.dart';
 import 'cards/card_model.dart';
@@ -55,10 +56,7 @@ Future<void> main() async {
   final localeController = LocaleController(prefs)..loadFromPrefs();
   final repository = CardRepository(prefs);
   runApp(
-    BrainflowApp(
-      localeController: localeController,
-      repository: repository,
-    ),
+    BrainflowApp(localeController: localeController, repository: repository),
   );
 }
 
@@ -169,12 +167,13 @@ class _HomeScreenState extends State<HomeScreen> {
   final _importer = const TriviaImporter();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
   static bool _didLogAddedTranslationsCount = false;
+  static final Set<String> _didLogTranslationPersistForLang = <String>{};
 
   var _section = DrawerSection.flow;
   var _loading = true;
   List<CardModel> _cards = const <CardModel>[];
   bool _persistingTranslations = false;
-  
+
   // Settings state
   bool _hapticsEnabled = true;
   bool _soundEnabled = true;
@@ -201,24 +200,28 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadCards() async {
     // Ensure seed cards are persisted if storage is empty
     await widget.repository.ensureSeed();
-    
+
     // Load raw cards
     final rawCards = await widget.repository.load();
     if (!mounted) return;
-    
+
     final systemLanguageCode =
         WidgetsBinding.instance.platformDispatcher.locale.languageCode;
     final currentLanguageCode =
         (widget.localeController.locale?.languageCode ?? systemLanguageCode)
             .toLowerCase();
-    final effectiveLanguageCode =
-        currentLanguageCode.isEmpty ? 'en' : currentLanguageCode;
-    
+    final effectiveLanguageCode = currentLanguageCode.isEmpty
+        ? 'en'
+        : currentLanguageCode;
+
     // Resolve cards for current locale
-    final resolvedCards = rawCards.map((card) => 
-      widget.repository.resolveForLocale(card, effectiveLanguageCode)
-    ).toList(growable: false);
-    
+    final resolvedCards = rawCards
+        .map(
+          (card) =>
+              widget.repository.resolveForLocale(card, effectiveLanguageCode),
+        )
+        .toList(growable: false);
+
     // Check if we need to download more (placeholder for future)
     final total = resolvedCards.length;
     final remaining = total; // In real implementation, track remaining cards
@@ -229,17 +232,19 @@ class _HomeScreenState extends State<HomeScreen> {
         total: total,
       );
     }
-    
+
     setState(() {
       _cards = resolvedCards;
       _loading = false;
     });
 
     // Background: persist missing translations for the active language.
-    unawaited(_persistMissingTranslationsIfNeeded(
-      rawCards: rawCards,
-      targetLang: effectiveLanguageCode,
-    ));
+    unawaited(
+      _persistMissingTranslationsIfNeeded(
+        rawCards: rawCards,
+        targetLang: effectiveLanguageCode,
+      ),
+    );
   }
 
   Future<void> _persistMissingTranslationsIfNeeded({
@@ -339,6 +344,29 @@ class _HomeScreenState extends State<HomeScreen> {
       // Persist once (batch) for all updated cards.
       await widget.repository.save(updatedCards);
 
+      // Debug-only: verify that persisted translations for this language can be read back.
+      if (kDebugMode && !_didLogTranslationPersistForLang.contains(lang)) {
+        _didLogTranslationPersistForLang.add(lang);
+        try {
+          final reloaded = await widget.repository.load();
+          final savedIds = <String>{for (final c in updatedCards) c.id};
+          var verified = 0;
+          for (final c in reloaded) {
+            if (!savedIds.contains(c.id)) continue;
+            final tr = c.translations;
+            if (tr != null && tr[lang] != null) {
+              verified++;
+            }
+          }
+          debugPrint(
+            'TRANSLATION_PERSIST_CHECK: lang=$lang '
+            'saved=${updatedCards.length} verified=$verified',
+          );
+        } catch (_) {
+          // Never crash on debug checks.
+        }
+      }
+
       if (!mounted) return;
       // Update UI with resolved cards (now that translations exist).
       final resolved = updatedCards
@@ -350,7 +378,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!_didLogAddedTranslationsCount) {
         _didLogAddedTranslationsCount = true;
-        debugPrint('ADDED TRANSLATIONS: addedTranslationsCount=$addedTranslationsCount');
+        debugPrint(
+          'ADDED TRANSLATIONS: addedTranslationsCount=$addedTranslationsCount',
+        );
       }
     } catch (_) {
       // Hard failsafe: never crash.
@@ -466,7 +496,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     shrinkWrap: true,
                     children: [
                       ListTile(
-                        leading: const Icon(Icons.local_fire_department_outlined),
+                        leading: const Icon(
+                          Icons.local_fire_department_outlined,
+                        ),
                         title: Text(l10n.report_too_hard),
                         onTap: () => Navigator.of(context).pop(),
                       ),
@@ -498,9 +530,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return Scaffold(
       key: _scaffoldKey,
-      appBar: isFlow ? null : AppBar(
-          title: Text(_sectionTitle(l10n, _section)),
-        ),
+      appBar: isFlow
+          ? null
+          : AppBar(title: Text(_sectionTitle(l10n, _section))),
       drawer: Drawer(
         child: SafeArea(
           child: Column(
@@ -560,8 +592,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       builder: (ctx) => _SettingsScreen(
                         hapticsEnabled: _hapticsEnabled,
                         soundEnabled: _soundEnabled,
-                        onHapticsChanged: (value) => setState(() => _hapticsEnabled = value),
-                        onSoundChanged: (value) => setState(() => _soundEnabled = value),
+                        onHapticsChanged: (value) =>
+                            setState(() => _hapticsEnabled = value),
+                        onSoundChanged: (value) =>
+                            setState(() => _soundEnabled = value),
                         onLanguageTap: () async {
                           await _openLanguageSheet();
                         },
@@ -590,36 +624,45 @@ class _HomeScreenState extends State<HomeScreen> {
                       child: _loading
                           ? const Center(child: CircularProgressIndicator())
                           : _cards.isEmpty
-                              ? Center(
-                                  child: Padding(
-                                    padding: const EdgeInsets.all(24),
-                                    child: Text(
-                                      l10n.no_cards_loaded,
-                                      textAlign: TextAlign.center,
-                                      style: Theme.of(context).textTheme.titleMedium,
-                                    ),
-                                  ),
-                                )
-                              : _FlowView(
-                                  cards: _cards,
-                                  onReport: _openReportSheet,
+                          ? Center(
+                              child: Padding(
+                                padding: const EdgeInsets.all(24),
+                                child: Text(
+                                  l10n.no_cards_loaded,
+                                  textAlign: TextAlign.center,
+                                  style: Theme.of(
+                                    context,
+                                  ).textTheme.titleMedium,
                                 ),
+                              ),
+                            )
+                          : _FlowView(
+                              cards: _cards,
+                              onReport: _openReportSheet,
+                              hapticsEnabled: _hapticsEnabled,
+                            ),
                     ),
                     Positioned(
                       top: 0,
                       left: 0,
                       right: 0,
                       child: Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 8,
+                        ),
                         child: Row(
                           children: [
                             Builder(
                               builder: (context) {
                                 return IconButton(
-                                  onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+                                  onPressed: () =>
+                                      _scaffoldKey.currentState?.openDrawer(),
                                   icon: const Icon(Icons.menu_rounded),
                                   style: IconButton.styleFrom(
-                                    backgroundColor: Colors.black.withValues(alpha: 0.35),
+                                    backgroundColor: Colors.black.withValues(
+                                      alpha: 0.35,
+                                    ),
                                     foregroundColor: Colors.white,
                                     shape: const CircleBorder(),
                                     padding: const EdgeInsets.all(10),
@@ -637,27 +680,27 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             )
           : _loading
-              ? const Center(child: CircularProgressIndicator())
-              : _cards.isEmpty
-                  ? Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(24),
-                        child: Text(
-                          l10n.no_cards_loaded,
-                          textAlign: TextAlign.center,
-                          style: Theme.of(context).textTheme.titleMedium,
-                        ),
-                      ),
-                    )
-                  : _section == DrawerSection.progress
-                      ? _ProgressSection(
-                          difficulty: _difficulty,
-                          onDifficultyChanged: (value) => setState(() => _difficulty = value),
-                        )
-                      : _PlaceholderSection(title: _sectionTitle(l10n, _section)),
+          ? const Center(child: CircularProgressIndicator())
+          : _cards.isEmpty
+          ? Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(
+                  l10n.no_cards_loaded,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              ),
+            )
+          : _section == DrawerSection.progress
+          ? _ProgressSection(
+              difficulty: _difficulty,
+              onDifficultyChanged: (value) =>
+                  setState(() => _difficulty = value),
+            )
+          : _PlaceholderSection(title: _sectionTitle(l10n, _section)),
     );
   }
-
 
   void _selectSection(DrawerSection section) {
     Navigator.of(context).pop(); // close drawer
@@ -761,7 +804,7 @@ class _BottomButton extends StatelessWidget {
     return Material(
       color: cs.surface.withValues(alpha: 0.6),
       borderRadius: BorderRadius.circular(16),
-        child: InkWell(
+      child: InkWell(
         borderRadius: BorderRadius.circular(16),
         onTap: onTap,
         child: Container(
@@ -808,10 +851,7 @@ class _SectionHeader extends StatelessWidget {
 }
 
 class _DifficultySelector extends StatelessWidget {
-  const _DifficultySelector({
-    required this.current,
-    required this.onSelected,
-  });
+  const _DifficultySelector({required this.current, required this.onSelected});
 
   final String current;
   final ValueChanged<String> onSelected;
@@ -828,10 +868,7 @@ class _DifficultySelector extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text(
-              'Schwierigkeit',
-              style: theme.textTheme.titleLarge,
-            ),
+            Text('Schwierigkeit', style: theme.textTheme.titleLarge),
             const SizedBox(height: 16),
             RadioGroup<String>(
               groupValue: current,
@@ -839,10 +876,14 @@ class _DifficultySelector extends StatelessWidget {
                 if (value != null) onSelected(value);
               },
               child: Column(
-                children: options.map((option) => RadioListTile<String>(
-                      title: Text(option),
-                      value: option,
-                    )).toList(),
+                children: options
+                    .map(
+                      (option) => RadioListTile<String>(
+                        title: Text(option),
+                        value: option,
+                      ),
+                    )
+                    .toList(),
               ),
             ),
           ],
@@ -884,10 +925,7 @@ class _DrawerHeader extends StatelessWidget {
                   style: Theme.of(context).textTheme.titleMedium,
                 ),
                 const SizedBox(height: 2),
-                Text(
-                  'MVP',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
+                Text('MVP', style: Theme.of(context).textTheme.bodySmall),
               ],
             ),
           ),
@@ -898,7 +936,6 @@ class _DrawerHeader extends StatelessWidget {
 }
 
 // (old list-style card widget removed; FLOW uses _FlowView now)
-
 
 class _LocaleOption {
   const _LocaleOption({required this.code, required this.title});
@@ -975,9 +1012,9 @@ class _ProgressSection extends StatelessWidget {
               title: Text(l10n.progress_select_categories),
               trailing: const Icon(Icons.chevron_right),
               onTap: () {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('TODO')),
-                );
+                ScaffoldMessenger.of(
+                  context,
+                ).showSnackBar(const SnackBar(content: Text('TODO')));
               },
             ),
           ],
@@ -1040,61 +1077,61 @@ class _AccountScreen extends StatelessWidget {
                 shrinkWrap: true,
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 children: [
-          _SectionHeader(title: l10n.account_section_profile),
-          ListTile(
-            leading: const Icon(Icons.edit_outlined),
-            title: Text(l10n.account_edit_profile),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.login_outlined),
-            title: Text(l10n.account_sign_in),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
-          const Divider(height: 32),
-          _SectionHeader(title: l10n.account_section_subscription),
-          ListTile(
-            leading: const Icon(Icons.card_membership_outlined),
-            title: Text(l10n.account_manage_subscription),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.restore_outlined),
-            title: Text(l10n.account_restore_purchases),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
-          const Divider(height: 32),
-          _SectionHeader(title: l10n.settings_section_info),
-          ListTile(
-            leading: const Icon(Icons.info_outline),
-            title: Text(l10n.settings_about),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
+                  _SectionHeader(title: l10n.account_section_profile),
+                  ListTile(
+                    leading: const Icon(Icons.edit_outlined),
+                    title: Text(l10n.account_edit_profile),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.login_outlined),
+                    title: Text(l10n.account_sign_in),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
+                  const Divider(height: 32),
+                  _SectionHeader(title: l10n.account_section_subscription),
+                  ListTile(
+                    leading: const Icon(Icons.card_membership_outlined),
+                    title: Text(l10n.account_manage_subscription),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.restore_outlined),
+                    title: Text(l10n.account_restore_purchases),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
+                  const Divider(height: 32),
+                  _SectionHeader(title: l10n.settings_section_info),
+                  ListTile(
+                    leading: const Icon(Icons.info_outline),
+                    title: Text(l10n.settings_about),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
                   const SizedBox(height: 20),
                 ],
               ),
@@ -1176,76 +1213,79 @@ class _SettingsScreen extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 children: [
                   _SectionHeader(title: l10n.settings_section_general),
-          ListTile(
-            leading: const Icon(Icons.language_outlined),
-            title: Text(l10n.menu_language),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () async {
-              await onLanguageTap();
-            },
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.vibration_outlined),
-            title: Text(l10n.settings_haptics),
-            value: hapticsEnabled,
-            onChanged: onHapticsChanged,
-          ),
-          SwitchListTile(
-            secondary: const Icon(Icons.volume_up_outlined),
-            title: Text(l10n.settings_sound),
-            value: soundEnabled,
-            onChanged: onSoundChanged,
-          ),
-          const Divider(height: 32),
-          _SectionHeader(title: l10n.settings_section_data),
-          ListTile(
-            leading: const Icon(Icons.refresh_outlined),
-            title: Text(l10n.settings_reload_cards),
-            onTap: () async {
-              await onReloadCards();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.cloud_download_outlined),
-            title: Text(l10n.settings_import_25),
-            onTap: () async {
-              await onImportCards();
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.delete_outline, color: Colors.red),
-            title: Text(
-              l10n.settings_reset_local,
-              style: const TextStyle(color: Colors.red),
-            ),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO: Confirm Dialog')),
-              );
-            },
-          ),
-          const Divider(height: 32),
-          _SectionHeader(title: l10n.settings_section_legal),
-          ListTile(
-            leading: const Icon(Icons.privacy_tip_outlined),
-            title: Text(l10n.settings_privacy),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.description_outlined),
-            title: Text(l10n.settings_imprint),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('TODO')),
-              );
-            },
-          ),
+                  ListTile(
+                    leading: const Icon(Icons.language_outlined),
+                    title: Text(l10n.menu_language),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () async {
+                      await onLanguageTap();
+                    },
+                  ),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.vibration_outlined),
+                    title: Text(l10n.settings_haptics),
+                    value: hapticsEnabled,
+                    onChanged: onHapticsChanged,
+                  ),
+                  SwitchListTile(
+                    secondary: const Icon(Icons.volume_up_outlined),
+                    title: Text(l10n.settings_sound),
+                    value: soundEnabled,
+                    onChanged: onSoundChanged,
+                  ),
+                  const Divider(height: 32),
+                  _SectionHeader(title: l10n.settings_section_data),
+                  ListTile(
+                    leading: const Icon(Icons.refresh_outlined),
+                    title: Text(l10n.settings_reload_cards),
+                    onTap: () async {
+                      await onReloadCards();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.cloud_download_outlined),
+                    title: Text(l10n.settings_import_25),
+                    onTap: () async {
+                      await onImportCards();
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(
+                      Icons.delete_outline,
+                      color: Colors.red,
+                    ),
+                    title: Text(
+                      l10n.settings_reset_local,
+                      style: const TextStyle(color: Colors.red),
+                    ),
+                    onTap: () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('TODO: Confirm Dialog')),
+                      );
+                    },
+                  ),
+                  const Divider(height: 32),
+                  _SectionHeader(title: l10n.settings_section_legal),
+                  ListTile(
+                    leading: const Icon(Icons.privacy_tip_outlined),
+                    title: Text(l10n.settings_privacy),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.description_outlined),
+                    title: Text(l10n.settings_imprint),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () {
+                      ScaffoldMessenger.of(
+                        context,
+                      ).showSnackBar(const SnackBar(content: Text('TODO')));
+                    },
+                  ),
                   const SizedBox(height: 20),
                 ],
               ),
@@ -1261,25 +1301,29 @@ class _FlowView extends StatefulWidget {
   const _FlowView({
     required this.cards,
     required this.onReport,
+    required this.hapticsEnabled,
   });
 
   final List<CardModel> cards;
   final Future<void> Function(CardModel card) onReport;
+  final bool hapticsEnabled;
 
   @override
   State<_FlowView> createState() => _FlowViewState();
 }
 
-class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixin {
+class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
   late final PageController _controller;
   late final AnimationController _cardScaleController;
   late final Animation<double> _cardScaleAnimation;
+  late final AnimationController _shakeController;
+  late final Animation<double> _shakeRotationAnimation;
+  late final Animation<Offset> _shakeTranslationAnimation;
   Timer? _feedbackTimer;
   int _currentIndex = 0;
   String? _previousCardId; // Track card ID for animation trigger
   bool _answerLocked = false;
   _FlowFeedback _feedback = _FlowFeedback.none;
-  int _feedbackSeed = 0;
   // Answer feedback state (for current card)
   String? _selectedAnswer; // null = not answered yet
   bool _isAnswered = false; // Whether an answer was selected
@@ -1287,7 +1331,6 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
   double _dragDx = 0.0;
   double _dragDy = 0.0;
   bool _swipeConsumed = false;
-  Offset? _fireworkOrigin;
 
   @override
   void initState() {
@@ -1299,19 +1342,71 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
       vsync: this,
     );
     _cardScaleAnimation = Tween<double>(begin: 0.98, end: 1.0).animate(
-      CurvedAnimation(
-        parent: _cardScaleController,
-        curve: Curves.easeOutCubic,
-      ),
+      CurvedAnimation(parent: _cardScaleController, curve: Curves.easeOutCubic),
     );
     // Start initial animation
     _cardScaleController.forward();
+
+    // Shake animation for Like/Dislike feedback
+    _shakeController = AnimationController(
+      duration: const Duration(milliseconds: 180), // 120-220ms range
+      vsync: this,
+    );
+    // Shake rotation: -3° to +3° (subtle)
+    _shakeRotationAnimation = TweenSequence<double>(
+      [
+        TweenSequenceItem(
+          tween: Tween<double>(begin: 0.0, end: -0.05),
+          weight: 1,
+        ), // ~-3°
+        TweenSequenceItem(
+          tween: Tween<double>(begin: -0.05, end: 0.05),
+          weight: 1,
+        ), // +3°
+        TweenSequenceItem(
+          tween: Tween<double>(begin: 0.05, end: -0.03),
+          weight: 1,
+        ), // -2°
+        TweenSequenceItem(
+          tween: Tween<double>(begin: -0.03, end: 0.0),
+          weight: 1,
+        ), // back to 0
+      ],
+    ).animate(CurvedAnimation(parent: _shakeController, curve: Curves.easeOut));
+    // Shake translation: small horizontal movement
+    _shakeTranslationAnimation = TweenSequence<Offset>(
+      [
+        TweenSequenceItem(
+          tween: Tween<Offset>(begin: Offset.zero, end: const Offset(-4, 0)),
+          weight: 1,
+        ),
+        TweenSequenceItem(
+          tween: Tween<Offset>(
+            begin: const Offset(-4, 0),
+            end: const Offset(4, 0),
+          ),
+          weight: 1,
+        ),
+        TweenSequenceItem(
+          tween: Tween<Offset>(
+            begin: const Offset(4, 0),
+            end: const Offset(-2, 0),
+          ),
+          weight: 1,
+        ),
+        TweenSequenceItem(
+          tween: Tween<Offset>(begin: const Offset(-2, 0), end: Offset.zero),
+          weight: 1,
+        ),
+      ],
+    ).animate(CurvedAnimation(parent: _shakeController, curve: Curves.easeOut));
   }
 
   @override
   void dispose() {
     _feedbackTimer?.cancel();
     _cardScaleController.dispose();
+    _shakeController.dispose();
     _controller.dispose();
     super.dispose();
   }
@@ -1320,8 +1415,22 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
     _feedbackTimer?.cancel();
     setState(() {
       _feedback = feedback;
-      _feedbackSeed++;
     });
+
+    // Trigger shake animation for Like/Dislike
+    if (feedback == _FlowFeedback.like || feedback == _FlowFeedback.dislike) {
+      _shakeController.reset();
+      _shakeController.forward();
+
+      // Haptic feedback (only if enabled)
+      if (widget.hapticsEnabled) {
+        if (feedback == _FlowFeedback.like) {
+          HapticFeedback.lightImpact();
+        } else if (feedback == _FlowFeedback.dislike) {
+          HapticFeedback.mediumImpact();
+        }
+      }
+    }
 
     _feedbackTimer = Timer(Duration(milliseconds: millis), () {
       if (!mounted) return;
@@ -1332,7 +1441,7 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
   Future<void> _goNext({int millis = 420}) async {
     if (!_controller.hasClients) return;
     if (widget.cards.isEmpty) return;
-    
+
     // Endless flow: always go to next page (PageView handles wrap-around via itemCount)
     await _controller.nextPage(
       duration: Duration(milliseconds: millis),
@@ -1353,7 +1462,12 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
     );
   }
 
-  Future<void> _handleAnswer(CardModel card, String answer, BuildContext? buttonContext, GlobalKey? cardStackKey) async {
+  Future<void> _handleAnswer(
+    CardModel card,
+    String answer,
+    BuildContext? buttonContext,
+    GlobalKey? cardStackKey,
+  ) async {
     if (_answerLocked) return;
     _answerLocked = true;
 
@@ -1362,7 +1476,7 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
       _answerLocked = false;
       return;
     }
-    
+
     // Update answer feedback state (ALWAYS set, even if comparison fails)
     setState(() {
       _selectedAnswer = answer;
@@ -1370,41 +1484,22 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
       _isCorrectlyAnswered = isCorrect;
     });
 
-    // Calculate firework origin from button position relative to card stack
-    Offset? origin;
-    if (isCorrect && buttonContext != null && cardStackKey != null && cardStackKey.currentContext != null) {
-      final buttonBox = buttonContext.findRenderObject() as RenderBox?;
-      final stackBox = cardStackKey.currentContext!.findRenderObject() as RenderBox?;
-      if (buttonBox != null && buttonBox.hasSize && stackBox != null) {
-        final buttonGlobal = buttonBox.localToGlobal(Offset.zero);
-        final stackGlobal = stackBox.localToGlobal(Offset.zero);
-        final buttonCenter = buttonGlobal + Offset(buttonBox.size.width / 2, buttonBox.size.height / 2);
-        origin = buttonCenter - stackGlobal;
-      }
-    }
-
     if (isCorrect) {
-      setState(() {
-        _fireworkOrigin = origin;
-      });
-      _showFeedback(_FlowFeedback.correct, millis: 800);
-      HapticFeedback.lightImpact();
-      // Wait for firework animation to complete (800ms)
+      // Optional light haptic for correct answer (respect settings)
+      if (widget.hapticsEnabled) {
+        HapticFeedback.lightImpact();
+      }
+      // Small pause before moving to next card
       await Future<void>.delayed(const Duration(milliseconds: 800));
       if (!mounted) return;
-      // Additional delay before page transition for smooth overlap
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      if (!mounted) return;
-      // Clear firework origin before transition
-      setState(() {
-        _fireworkOrigin = null;
-      });
       // Smooth page transition with longer duration
       await _goNext(millis: 420);
     } else {
       // Shorter feedback, but ensure it doesn't change during transition
       _showFeedback(_FlowFeedback.wrong, millis: 200);
-      HapticFeedback.mediumImpact();
+      if (widget.hapticsEnabled) {
+        HapticFeedback.mediumImpact();
+      }
       await Future<void>.delayed(const Duration(milliseconds: 200));
       if (!mounted) return;
       // Small delay before transition for smooth feel
@@ -1413,7 +1508,6 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
       // Same smooth transition parameters as correct answer
       await _goNext(millis: 420);
     }
-    
 
     if (!mounted) return;
     _answerLocked = false;
@@ -1424,11 +1518,11 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
     if (widget.cards.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
-    
+
     // Use very large itemCount for endless flow
     const maxItemCount = 10000;
     final itemCount = math.min(widget.cards.length * 100, maxItemCount);
-    
+
     return PageView.builder(
       controller: _controller,
       scrollDirection: Axis.vertical,
@@ -1438,13 +1532,13 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
         final actualIndex = i % widget.cards.length;
         final currentCard = widget.cards[actualIndex];
         final currentCardId = currentCard.id;
-        
+
         // Trigger scale-in animation if card ID changed
         if (currentCardId != _previousCardId) {
           _cardScaleController.reset();
           _cardScaleController.forward();
         }
-        
+
         setState(() {
           _currentIndex = actualIndex;
           _previousCardId = currentCardId;
@@ -1456,7 +1550,7 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
           _isAnswered = false;
           _isCorrectlyAnswered = false;
         });
-        
+
         // Check if we need to download more cards (placeholder)
         if (widget.cards.isNotEmpty) {
           final remaining = widget.cards.length - actualIndex;
@@ -1473,147 +1567,156 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
         final style = _categoryStyle(card.category);
         final isActive = cardIndex == _currentIndex;
         final showWrongFlash = isActive && _feedback == _FlowFeedback.wrong;
-        
+
         // Create a local key for this card's stack
         final cardStackKey = GlobalKey();
 
-        return GestureDetector(
-                onPanStart: (_) {
-                  _dragDx = 0;
-                  _dragDy = 0;
-                  _swipeConsumed = false;
-                },
-                onPanUpdate: (details) {
-                  _dragDx += details.delta.dx;
-                  _dragDy += details.delta.dy;
-                },
-                onPanEnd: (_) {
-                  if (_answerLocked) return;
-                  if (_swipeConsumed) return;
+        return GestureDetector
+          (
+          onPanStart: (_) {
+            _dragDx = 0;
+            _dragDy = 0;
+            _swipeConsumed = false;
+          },
+          onPanUpdate: (details) {
+            _dragDx += details.delta.dx;
+            _dragDy += details.delta.dy;
+          },
+          onPanEnd: (_) {
+            if (_answerLocked) return;
+            if (_swipeConsumed) return;
 
-                  final absDx = _dragDx.abs();
-                  final absDy = _dragDy.abs();
+            final absDx = _dragDx.abs();
+            final absDy = _dragDy.abs();
 
-                  // Nur reagieren, wenn horizontal dominanter als vertikal
-                  if (absDx > absDy) {
-                    _swipeConsumed = true;
-                    if (_dragDx > 0) {
-                      // Swipe nach rechts → Like
-                      _showFeedback(_FlowFeedback.like, millis: 660); // +400ms longer
-                      return;
-                    } else {
-                      // Swipe nach links → Dislike
-                      _showFeedback(_FlowFeedback.dislike, millis: 660); // +400ms longer
-                      return;
-                    }
-                  }
+            // Nur reagieren, wenn horizontal dominanter als vertikal
+            if (absDx > absDy) {
+              _swipeConsumed = true;
+              if (_dragDx > 0) {
+                // Swipe nach rechts → Like
+                _showFeedback(
+                  _FlowFeedback.like,
+                  millis: 600,
+                ); // 500-700ms range
+                return;
+              } else {
+                // Swipe nach links → Dislike
+                _showFeedback(
+                  _FlowFeedback.dislike,
+                  millis: 600,
+                ); // 500-700ms range
+                return;
+              }
+            }
+          },
+          child: Stack(
+            key: cardStackKey,
+            children: [
+              // Shake + Scale animation wrapper (only for active card)
+              AnimatedBuilder(
+                animation: _shakeController,
+                builder: (context, child) {
+                  final offset =
+                      isActive ? _shakeTranslationAnimation.value : Offset.zero;
+                  final angle =
+                      isActive ? _shakeRotationAnimation.value : 0.0;
+                  return Transform.translate(
+                    offset: offset,
+                    child: Transform.rotate(
+                      angle: angle,
+                      child: child,
+                    ),
+                  );
                 },
-                child: Stack(
-                  key: cardStackKey,
-                  children: [
-                    // Scale-in animation wrapper (only for active card)
-                    ScaleTransition(
-                      scale: isActive ? _cardScaleAnimation : const AlwaysStoppedAnimation(1.0),
-                      child: Card(
-                        margin: EdgeInsets.zero,
-                        elevation: 0,
-                        color: Theme.of(context)
-                            .colorScheme
-                            .surfaceContainerHighest
-                            .withValues(alpha: 0.72),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          side: BorderSide(
-                            color: style.color.withValues(alpha: 0.70),
-                            width: 1.2,
-                          ),
-                        ),
-                        child: Padding(
-                          padding: const EdgeInsets.all(14),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _FlowTopRow(
-                                card: card,
-                                onReport: () => widget.onReport(card),
-                              ),
-                              const SizedBox(height: 12),
-                              Expanded(
-                                child: _FlowCard(
-                                  card: card,
-                                  style: style,
-                                  locked: _answerLocked && isActive,
-                                  onAnswer: (a, context) => _handleAnswer(card, a, context, cardStackKey),
-                                  // Answer feedback state (only for active card)
-                                  isAnswered: isActive ? _isAnswered : false,
-                                  selectedAnswer: isActive ? _selectedAnswer : null,
-                                  isCorrectlyAnswered: isActive ? _isCorrectlyAnswered : false,
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                            ],
-                          ),
-                        ),
+                child: ScaleTransition(
+                  scale: isActive
+                      ? _cardScaleAnimation
+                      : const AlwaysStoppedAnimation(1.0),
+                  child: Card(
+                    margin: EdgeInsets.zero,
+                    elevation: 0,
+                    color: Theme.of(context)
+                        .colorScheme
+                        .surfaceContainerHighest
+                        .withValues(alpha: 0.72),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                      side: BorderSide(
+                        color: style.color.withValues(alpha: 0.70),
+                        width: 1.2,
                       ),
                     ),
-                    if (isActive && _feedback == _FlowFeedback.like)
-                      Container(
-                        width: double.infinity,
-                        height: double.infinity,
-                        color: Colors.green.withValues(alpha: 0.32),
-                        child: const Center(
-                          child: Icon(
-                            Icons.thumb_up_alt_rounded,
-                            size: 48,
-                            color: Colors.white,
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          _FlowTopRow(
+                            card: card,
+                            onReport: () => widget.onReport(card),
                           ),
-                        ),
-                      ),
-                    if (isActive && _feedback == _FlowFeedback.dislike)
-                      Container(
-                        width: double.infinity,
-                        height: double.infinity,
-                        color: Colors.red.withValues(alpha: 0.32),
-                        child: const Center(
-                          child: Icon(
-                            Icons.thumb_down_alt_rounded,
-                            size: 48,
-                            color: Colors.white,
+                          const SizedBox(height: 12),
+                          Expanded(
+                            child: _FlowCard(
+                              card: card,
+                              style: style,
+                              locked: _answerLocked && isActive,
+                              onAnswer: (a, context) => _handleAnswer(
+                                card,
+                                a,
+                                context,
+                                cardStackKey,
+                              ),
+                              // Answer feedback state (only for active card)
+                              isAnswered: isActive ? _isAnswered : false,
+                              selectedAnswer:
+                                  isActive ? _selectedAnswer : null,
+                              isCorrectlyAnswered:
+                                  isActive ? _isCorrectlyAnswered : false,
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: 8),
+                        ],
                       ),
-                    if (isActive && _feedback == _FlowFeedback.correct && _fireworkOrigin != null)
-                      IgnorePointer(
-                        child: Builder(
-                          builder: (context) {
-                            final screenSize = MediaQuery.of(context).size;
-                            final maxDimension = math.max(screenSize.width, screenSize.height) * 1.5;
-                            final offset = maxDimension / 2;
-                            
-                            return Stack(
-                              children: [
-                                Positioned.fill(
-                                  child: Container(
-                                    color: Colors.white.withValues(alpha: 0.06),
-                                  ),
-                                ),
-                                Positioned(
-                                  left: _fireworkOrigin!.dx - offset,
-                                  top: _fireworkOrigin!.dy - offset,
-                                  child: _FireworkBurst(
-                                    key: ValueKey('firework_$_feedbackSeed'),
-                                    color: style.color,
-                                    seed: _feedbackSeed,
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                  ],
+                    ),
+                  ),
                 ),
-              );
+              ),
+              if (isActive && _feedback == _FlowFeedback.like)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    width: double.infinity,
+                    height: double.infinity,
+                    color: Colors.green.withValues(alpha: 0.32),
+                    child: const Center(
+                      child: Icon(
+                        Icons.thumb_up_alt_rounded,
+                        size: 48,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+              if (isActive && _feedback == _FlowFeedback.dislike)
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    width: double.infinity,
+                    height: double.infinity,
+                    color: Colors.red.withValues(alpha: 0.32),
+                    child: const Center(
+                      child: Icon(
+                        Icons.thumb_down_alt_rounded,
+                        size: 48,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        );
       },
     );
   }
@@ -1641,13 +1744,8 @@ class _FlowViewState extends State<_FlowView> with SingleTickerProviderStateMixi
           size: 32,
         );
       case _FlowFeedback.wrong:
-        return const SizedBox.shrink();
       case _FlowFeedback.correct:
-        return _FireworkBurst(
-          key: ValueKey('firework_$seed'),
-          color: accent,
-          seed: seed,
-        );
+        return const SizedBox.shrink();
     }
   }
 }
@@ -1677,10 +1775,7 @@ class _FlowTopRow extends StatelessWidget {
               icon: const Icon(Icons.flag_outlined),
               visualDensity: VisualDensity.compact,
               padding: EdgeInsets.zero,
-              constraints: const BoxConstraints(
-                minWidth: 36,
-                minHeight: 36,
-              ),
+              constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
             ),
           ],
         ),
@@ -1730,26 +1825,31 @@ class _FlowCard extends StatelessWidget {
         ),
         const SizedBox(height: 10),
         Flexible(
-          flex: 5,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: cs.surface.withValues(alpha: 0.45),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: style.color.withValues(alpha: 0.28),
-                width: 1,
+          // Slightly smaller question area; keep it readable but limit height
+          flex: 4,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 150),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              decoration: BoxDecoration(
+                color: cs.surface.withValues(alpha: 0.45),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: style.color.withValues(alpha: 0.18),
+                  width: 1,
+                ),
               ),
-            ),
-            child: Center(
-              child: _AutoFitText(
-                text: card.question,
-                textAlign: TextAlign.center,
-                maxLines: 4,
-                minFontSize: 14.4, // 16 * 0.9 (10% kleiner)
-                maxFontSize: 30.6, // 34 * 0.9 (10% kleiner)
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
+              child: Center(
+                child: _AutoFitText(
+                  text: card.question,
+                  textAlign: TextAlign.center,
+                  // Limit max lines / font size so the question doesn't dominate
+                  maxLines: 5,
+                  minFontSize: 10.0,
+                  maxFontSize: 20.0,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
             ),
@@ -1758,10 +1858,16 @@ class _FlowCard extends StatelessWidget {
         // meta section removed
         const SizedBox(height: 8),
         Expanded(
-          flex: 5,
+          // Give answers a bit more vertical space for better tap targets
+          flex: 6,
           child: _AnswerGrid(
             answers: card.answers.take(4).toList(growable: false),
-            correctAnswer: card.correctAnswer,
+            correctIndex: () {
+              final visibleAnswers =
+                  card.answers.take(4).toList(growable: false);
+              final idx = visibleAnswers.indexOf(card.correctAnswer);
+              return idx >= 0 ? idx : 0;
+            }(),
             locked: locked,
             onAnswer: onAnswer,
             isAnswered: isAnswered,
@@ -1806,14 +1912,33 @@ class _AutoFitText extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
+        // Binary search for optimal font size (more efficient, less flicker)
+        double low = minFontSize;
+        double high = maxFontSize;
         double fontSize = maxFontSize;
-        while (fontSize > minFontSize && !_fits(constraints, fontSize)) {
-          fontSize -= 1;
+
+        // Quick check: if max size fits, use it
+        if (_fits(constraints, maxFontSize)) {
+          fontSize = maxFontSize;
+        } else {
+          // Binary search for best fit
+          while (high - low > 0.5) {
+            final mid = (low + high) / 2;
+            if (_fits(constraints, mid)) {
+              low = mid;
+              fontSize = mid;
+            } else {
+              high = mid;
+            }
+          }
+          fontSize = low;
         }
+
         return Text(
           text,
           textAlign: textAlign,
           maxLines: maxLines,
+          overflow: TextOverflow.ellipsis,
           style: (style ?? const TextStyle()).copyWith(fontSize: fontSize),
         );
       },
@@ -1879,7 +2004,7 @@ _CategoryStyle _categoryStyle(String? rawCategory) {
 class _AnswerGrid extends StatelessWidget {
   const _AnswerGrid({
     required this.answers,
-    required this.correctAnswer,
+    required this.correctIndex,
     required this.locked,
     required this.onAnswer,
     required this.isAnswered,
@@ -1888,7 +2013,7 @@ class _AnswerGrid extends StatelessWidget {
   });
 
   final List<String> answers;
-  final String correctAnswer;
+  final int correctIndex;
   final bool locked;
   final void Function(String, BuildContext?) onAnswer;
   final bool isAnswered;
@@ -1897,45 +2022,43 @@ class _AnswerGrid extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final palette = <Color>[
-      const Color(0xFFEF4444), // A red
-      const Color(0xFF22C55E), // B green
-      const Color(0xFF3B82F6), // C blue
-      const Color(0xFFFACC15), // D yellow
-    ];
+    final cs = Theme.of(context).colorScheme;
+    // Neutral base border for all answers; explicit green accent for the correct one
+    final Color neutralBorder = cs.outlineVariant.withValues(alpha: 0.6);
+    // Explicit green for correct-answer highlight (avoid theme pinks)
+    final Color accentBorder = const Color(0xFF22C55E);
 
     final normalized = answers.length >= 4
         ? answers.take(4).toList(growable: false)
-        : <String>[
-            ...answers,
-            for (var i = answers.length; i < 4; i++) '',
-          ];
+        : <String>[...answers, for (var i = answers.length; i < 4; i++) ''];
 
     Widget button(int idx, BuildContext gridContext) {
       final label = normalized[idx];
-      final color = palette[idx];
-      final isCorrect = label == correctAnswer;
-      final isSelected = label == selectedAnswer;
-      
-      // Determine button state based on answer feedback rules
+      final isCorrect = idx == correctIndex;
+      final isSelected = selectedAnswer != null && label == selectedAnswer;
+
+      // Determine visual state based on answer rules
       bool shouldHighlight = false;
       bool shouldDim = false;
-      
+
       if (isAnswered) {
         if (isCorrectlyAnswered) {
-          // If answered correctly: only correct button is highlighted, others dimmed
+          // STATE_CORRECT: highlight only the correct answer (no blur), dim all others
           shouldHighlight = isCorrect;
           shouldDim = !isCorrect;
         } else {
-          // If answered incorrectly: all buttons dimmed (no highlight)
+          // STATE_WRONG: dim/blur all answers, no highlight to hide the correct one
           shouldDim = true;
         }
       }
-      
+
+      final Color borderColor =
+          shouldHighlight ? accentBorder : neutralBorder;
+
       return Builder(
         builder: (buttonContext) => _AnswerButton(
           label: label,
-          borderColor: color,
+          borderColor: borderColor,
           enabled: !locked && label.isNotEmpty,
           onTap: () => onAnswer(label, buttonContext),
           shouldHighlight: shouldHighlight,
@@ -2005,61 +2128,120 @@ class _AnswerButtonState extends State<_AnswerButton> {
           color: Colors.transparent,
           child: InkWell(
             borderRadius: BorderRadius.circular(14),
-            onTap: widget.enabled ? widget.onTap : null,
-            onTapDown: widget.enabled ? (_) => setState(() => _pressed = true) : null,
-            onTapCancel: widget.enabled ? () => setState(() => _pressed = false) : null,
-            onTapUp: widget.enabled ? (_) => setState(() => _pressed = false) : null,
+            onTap: widget.enabled
+                ? widget.onTap
+                : null, // Lock handled by 'locked' prop
+            onTapDown: widget.enabled
+                ? (_) => setState(() => _pressed = true)
+                : null,
+            onTapCancel: widget.enabled
+                ? () => setState(() => _pressed = false)
+                : null,
+            onTapUp: widget.enabled
+                ? (_) => setState(() => _pressed = false)
+                : null,
             child: ClipRRect(
               borderRadius: BorderRadius.circular(14),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(
-                  sigmaX: widget.shouldDim ? 2.5 : 0.0,
-                  sigmaY: widget.shouldDim ? 2.5 : 0.0,
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: widget.borderColor.withValues(
-                        alpha: widget.shouldDim
-                            ? 0.25
-                            : (widget.shouldHighlight ? 1.0 : (widget.enabled ? 0.95 : 0.35)),
-                      ),
-                      width: widget.shouldHighlight ? 2.2 : 1.6,
-                    ),
-                    color: widget.shouldDim
-                        ? Colors.black.withValues(alpha: 0.15)
-                        : Colors.transparent,
-                    boxShadow: widget.shouldHighlight
-                        ? [
-                            BoxShadow(
-                              color: widget.borderColor.withValues(alpha: 0.4),
-                              blurRadius: 8,
-                              spreadRadius: 0,
+              child: widget.shouldDim
+                  ? BackdropFilter(
+                      // Strong blur for non-relevant answers
+                      filter: ImageFilter.blur(sigmaX: 4.0, sigmaY: 4.0),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 450),
+                        curve: Curves.easeOutCubic,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          // slightly reduce height (~10% kleiner als vorher)
+                          vertical: 9,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: widget.borderColor.withValues(
+                              // keep border subtle even if highlight flag is set
+                              alpha: widget.shouldHighlight ? 0.5 : 0.25,
                             ),
-                          ]
-                        : null,
-                  ),
-                  child: Center(
-                    child: Text(
-                      widget.label,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                            fontSize: 16.8, // 14 * 1.2 (20% größer)
-                            fontWeight: FontWeight.w700,
-                            color: widget.shouldDim
-                                ? Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.30)
-                                : (widget.enabled
-                                    ? Theme.of(context).colorScheme.onSurface
-                                    : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.45)),
+                            width: 1.6,
                           ),
-                    ),
+                          color: Colors.black.withValues(
+                            alpha: 0.22,
+                          ),
+                        ),
+                        child: Center(
+                          child: Text(
+                            widget.label,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodyMedium
+                                ?.copyWith(
+                                  fontSize: 16.8,
+                                  fontWeight: FontWeight.w700,
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onSurface
+                                      .withValues(alpha: 0.30),
+                                ),
+                          ),
+                        ),
+                      ),
+                    )
+                  : AnimatedContainer(
+                  duration: const Duration(milliseconds: 450),
+                  curve: Curves.easeOutCubic,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    // slightly reduced height (~10% kleiner als vorher)
+                    vertical: 9,
                   ),
-                ),
-              ),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: widget.borderColor.withValues(
+                            alpha:
+                                widget.shouldHighlight ? 1.0 : (widget.enabled ? 0.45 : 0.30),
+                          ),
+                          width: widget.shouldHighlight ? 2.2 : 1.6,
+                        ),
+                        color: widget.shouldHighlight
+                            ? widget.borderColor.withValues(alpha: 0.85)
+                            : Colors.transparent,
+                        boxShadow: widget.shouldHighlight
+                            ? [
+                                BoxShadow(
+                                  color: widget.borderColor.withValues(alpha: 0.55),
+                                  blurRadius: 12,
+                                  spreadRadius: 1.0,
+                                ),
+                              ]
+                            : null,
+                      ),
+                      child: Center(
+                        child: Text(
+                          widget.label,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                          style: Theme.of(context)
+                              .textTheme
+                              .bodyMedium
+                              ?.copyWith(
+                                fontSize: 16.8,
+                                fontWeight: FontWeight.w700,
+                                color: widget.shouldHighlight
+                                    ? Colors.white
+                                    : Theme.of(context)
+                                        .colorScheme
+                                        .onSurface
+                                        .withValues(
+                                          alpha: widget.enabled ? 0.95 : 0.45,
+                                        ),
+                              ),
+                        ),
+                      ),
+                    ),
             ),
           ),
         ),
@@ -2068,210 +2250,3 @@ class _AnswerButtonState extends State<_AnswerButton> {
   }
 }
 
-class _FireworkBurst extends StatefulWidget {
-  const _FireworkBurst({super.key, required this.color, required this.seed});
-  final Color color;
-  final int seed;
-
-  @override
-  State<_FireworkBurst> createState() => _FireworkBurstState();
-}
-
-class _FireworkBurstState extends State<_FireworkBurst>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _c;
-
-  @override
-  void initState() {
-    super.initState();
-    _c = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 800),
-    )..forward();
-  }
-
-  @override
-  void dispose() {
-    _c.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Use screen size to fill entire screen
-    final screenSize = MediaQuery.of(context).size;
-    final maxDimension = math.max(screenSize.width, screenSize.height) * 1.5;
-    
-    return SizedBox(
-      height: maxDimension,
-      width: maxDimension,
-      child: AnimatedBuilder(
-        animation: _c,
-        builder: (context, _) {
-          return CustomPaint(
-            painter: _FireworkPainter(
-              t: _c.value,
-              color: widget.color,
-              seed: widget.seed,
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _FireworkPainter extends CustomPainter {
-  const _FireworkPainter({required this.t, required this.color, required this.seed});
-  final double t;
-  final Color color;
-  final int seed;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    
-    // Gold color palette - warm golden colors
-    final goldBase = const Color(0xFFFFD700); // Gold
-    final goldWarm = const Color(0xFFFFC84A); // Warm gold
-    final goldBright = const Color(0xFFFFF8DC); // Bright gold
-    final whiteGold = const Color(0xFFFFFEF0); // White with gold tint
-
-    // Phase detection
-    final phase1 = t < 0.25; // 0-25%: Flash & explosive burst
-    final phase2 = t >= 0.25 && t < 0.75; // 25-75%: Flitter spreads
-    final phase3 = t >= 0.75; // 75-100%: Fade out
-
-    // Phase 1: Bright core flash (white → gold)
-    if (phase1) {
-      final flashProgress = t / 0.25;
-      final flashAlpha = (1 - flashProgress * 2.5).clamp(0.0, 1.0);
-      final flashPaint = Paint()
-        ..color = Colors.white.withValues(alpha: flashAlpha * 0.95)
-        ..style = PaintingStyle.fill;
-      final flashRadius = 6.0 * (1 - flashProgress);
-      canvas.drawCircle(center, flashRadius, flashPaint);
-      
-      // Transition to gold
-      final goldFlashPaint = Paint()
-        ..color = goldBase.withValues(alpha: flashAlpha * 0.8)
-        ..style = PaintingStyle.fill;
-      canvas.drawCircle(center, flashRadius * 0.7, goldFlashPaint);
-    }
-
-    // Many golden flitter particles - like confetti (single explosion)
-    const flitterCount = 338; // 260 * 1.3 (another 30% increase)
-    final maxDist = size.shortestSide * 0.65;
-    final baseAngle = -math.pi / 2; // Upward direction
-    final spread = 0.95 * math.pi; // Very wide spread, biased upward
-
-    final particlePaint = Paint()
-      ..style = PaintingStyle.fill;
-
-    for (var i = 0; i < flitterCount; i++) {
-      final r = math.Random(seed ^ (i * 0x9E3779B9));
-      
-      // Angle: biased upward with symmetric left-right distribution
-      // Ensure equal distribution left and right of center
-      final randomValue = r.nextDouble();
-      
-      // Symmetric horizontal distribution: -1 to 1, centered at 0
-      final horizontalFactor = (randomValue - 0.5) * 2.0; // -1.0 to 1.0
-      
-      // Upward bias: -0.25 to 0.25 (biased upward)
-      final upwardBias = -0.25 + r.nextDouble() * 0.5; // -0.25 to 0.25
-      
-      // Combine: upward bias + symmetric horizontal spread
-      final angleOffset = upwardBias * spread + horizontalFactor * spread * 0.5;
-      final jitter = (r.nextDouble() - 0.5) * 0.3;
-      final angle = baseAngle + angleOffset + jitter;
-      
-      // Speed variation - different particles move at different speeds
-      final speedMultiplier = 0.5 + r.nextDouble() * 0.6;
-      final speed = maxDist * speedMultiplier;
-      
-      // Time-based position - faster acceleration outward, all particles start at t=0
-      double progress;
-      if (phase1) {
-        // Explosive burst - fast start
-        final phase1Progress = t / 0.25;
-        progress = Curves.easeOutCubic.transform(phase1Progress) * 0.4;
-      } else if (phase2) {
-        // Spread out - accelerate faster outward (quadratic acceleration)
-        final phase2Progress = (t - 0.25) / 0.5;
-        // Quadratic curve for faster acceleration: progress^2
-        final acceleratedProgress = phase2Progress * phase2Progress;
-        progress = 0.4 + acceleratedProgress * 0.55;
-      } else {
-        // Fade out - continue fast outward
-        final phase3Progress = (t - 0.75) / 0.25;
-        // Continue with fast progress
-        progress = 0.95 + phase3Progress * 0.05;
-      }
-      
-      final dist = speed * progress;
-      
-      // Ballistic movement with gravity
-      final vx = math.cos(angle) * dist;
-      final vy = math.sin(angle) * dist;
-      final gravityY = 0.5 * 100.0 * progress * progress;
-      
-      // Additional jitter for chaos
-      final jitterX = (r.nextDouble() - 0.5) * 12.0 * progress;
-      final jitterY = (r.nextDouble() - 0.5) * 12.0 * progress;
-      
-      final pos = center + Offset(
-        vx + jitterX,
-        vy + gravityY + jitterY,
-      );
-      
-      // Particle size: varies from very small to medium (flitter sizes)
-      // Mix of small sparkles and larger particles (30% larger for more mass)
-      final sizeVariation = r.nextDouble();
-      final particleSize = sizeVariation < 0.6 
-          ? (0.8 + sizeVariation * 1.2) * 1.3  // 60% small sparkles (1.04-2.6px, 30% larger)
-          : (1.5 + (sizeVariation - 0.6) * 8.75) * 1.3; // 40% larger particles (1.95-6.5px, 30% larger)
-      
-      // Color variation: warm gold → bright gold → white-gold
-      Color particleColor;
-      final colorVariation = r.nextDouble();
-      if (colorVariation < 0.35) {
-        // 35% warm gold
-        particleColor = goldWarm;
-      } else if (colorVariation < 0.65) {
-        // 30% base gold
-        particleColor = goldBase;
-      } else if (colorVariation < 0.85) {
-        // 20% bright gold
-        particleColor = goldBright;
-      } else {
-        // 15% white-gold (more sparkles)
-        particleColor = whiteGold;
-      }
-      
-      // Alpha: fade out in phase 3, slight variation
-      double alpha;
-      if (phase3) {
-        final fadeProgress = (t - 0.75) / 0.25;
-        alpha = (1 - fadeProgress * fadeProgress).clamp(0.0, 1.0);
-      } else {
-        // Slight fade based on distance
-        alpha = 1.0 - progress * 0.2;
-      }
-      
-      // Add some brightness variation
-      final brightnessVariation = 0.85 + r.nextDouble() * 0.15;
-      alpha *= brightnessVariation;
-      
-      particlePaint.color = particleColor.withValues(alpha: alpha.clamp(0.0, 1.0));
-      
-      // Draw particle as circle
-      canvas.drawCircle(pos, particleSize, particlePaint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant _FireworkPainter oldDelegate) {
-    return oldDelegate.t != t || oldDelegate.color != color;
-  }
-}
