@@ -1802,72 +1802,116 @@ class _FlowCard extends StatelessWidget {
   final String? selectedAnswer;
   final bool isCorrectlyAnswered;
 
+  // Fixed layout metrics for the Flow card
+  static const double _iconZoneBaseHeight = 72.0;
+  static const double _questionZoneBaseHeight = 230.0;
+  static const double _answersZoneBaseHeight = 280.0;
+
+  // Answer button metrics
+  static const double _answerButtonHeight = 60.0;
+  static const double _answerButtonSpacing = 10.0;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
-    // meta variable removed
+    // Fixed-slot layout inside the card to avoid jumps:
+    // 1) Icon zone, 2) Question box, 3) Answers box.
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final totalHeight = constraints.maxHeight;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const SizedBox(height: 4),
-        Center(
-          child: SizedBox(
-            height: 58,
-            width: 58,
-            child: SvgPicture.asset(
-              style.assetPath,
-              colorFilter: ColorFilter.mode(style.color, BlendMode.srcIn),
-            ),
-          ),
-        ),
-        const SizedBox(height: 10),
-        // Question area with bounded height; non-flex so it doesn't eat all space
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 150),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: cs.surface.withValues(alpha: 0.45),
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: style.color.withValues(alpha: 0.18),
-                width: 1,
-              ),
-            ),
-            child: Center(
-              child: _AutoFitText(
-                text: card.question,
-                textAlign: TextAlign.center,
-                // Limit max lines / font size so the question doesn't dominate
-                maxLines: 5,
-                minFontSize: 10.0,
-                maxFontSize: 20.0,
-                style: theme.textTheme.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
+        // Basisslots (leicht skalierbar auf sehr kleinen/großen Screens)
+        const double baseIconZoneHeight = _iconZoneBaseHeight;
+        const double baseQuestionZoneHeight = _questionZoneBaseHeight;
+        const double baseAnswersZoneHeight = _answersZoneBaseHeight;
+
+        final double baseTotal =
+            baseIconZoneHeight + baseQuestionZoneHeight + baseAnswersZoneHeight;
+        final double scaleFactor =
+            totalHeight > 0 ? (totalHeight / baseTotal).clamp(0.85, 1.1) : 1.0;
+
+        final double iconZoneHeight = baseIconZoneHeight * scaleFactor;
+        final double questionZoneHeight = baseQuestionZoneHeight * scaleFactor;
+        final double answersZoneHeight = baseAnswersZoneHeight * scaleFactor;
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Zone 1: Category icon at the top, fixed-ish height
+            SizedBox(
+              height: iconZoneHeight,
+              child: Center(
+                child: SizedBox(
+                  height: 58,
+                  width: 58,
+                  child: SvgPicture.asset(
+                    style.assetPath,
+                    colorFilter: ColorFilter.mode(
+                      style.color,
+                      BlendMode.srcIn,
+                    ),
+                  ),
                 ),
               ),
             ),
-          ),
-        ),
-        // Push answers to the bottom of the card regardless of question height
-        const Spacer(),
-        _AnswerGrid(
-          answers: card.answers.take(4).toList(growable: false),
-          correctIndex: () {
-            final visibleAnswers = card.answers.take(4).toList(growable: false);
-            final idx = visibleAnswers.indexOf(card.correctAnswer);
-            return idx >= 0 ? idx : 0;
-          }(),
-          locked: locked,
-          onAnswer: onAnswer,
-          isAnswered: isAnswered,
-          selectedAnswer: selectedAnswer,
-          isCorrectlyAnswered: isCorrectlyAnswered,
-        ),
-      ],
+            const SizedBox(height: 8),
+            // Zone 2: Question box with fixed height; text auto-fits inside
+            SizedBox(
+              height: questionZoneHeight,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: cs.surface.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: style.color.withValues(alpha: 0.18),
+                    width: 1,
+                  ),
+                ),
+                child: Center(
+                  child: _AutoFitText(
+                    text: card.question,
+                    textAlign: TextAlign.center,
+                    maxLines: 5,
+                    minFontSize: 10.0,
+                    maxFontSize: 20.0,
+                    style: theme.textTheme.headlineSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Zone 3: Answers box with fixed height; 4 equal-height buttons live inside
+            SizedBox(
+              height: answersZoneHeight,
+              child: Align(
+                alignment: Alignment.bottomCenter,
+                child: _AnswerGrid(
+                  answers: card.answers.take(4).toList(growable: false),
+                  correctIndex: () {
+                    final visibleAnswers =
+                        card.answers.take(4).toList(growable: false);
+                    final idx = visibleAnswers.indexOf(card.correctAnswer);
+                    return idx >= 0 ? idx : 0;
+                  }(),
+                  locked: locked,
+                  onAnswer: onAnswer,
+                  isAnswered: isAnswered,
+                  selectedAnswer: selectedAnswer,
+                  isCorrectlyAnswered: isCorrectlyAnswered,
+                  buttonHeight: _answerButtonHeight,
+                  buttonSpacing: _answerButtonSpacing,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 }
@@ -2002,6 +2046,8 @@ class _AnswerGrid extends StatelessWidget {
     required this.isAnswered,
     required this.selectedAnswer,
     required this.isCorrectlyAnswered,
+    required this.buttonHeight,
+    required this.buttonSpacing,
   });
 
   final List<String> answers;
@@ -2011,6 +2057,8 @@ class _AnswerGrid extends StatelessWidget {
   final bool isAnswered;
   final String? selectedAnswer;
   final bool isCorrectlyAnswered;
+  final double buttonHeight;
+  final double buttonSpacing;
 
   @override
   Widget build(BuildContext context) {
@@ -2064,13 +2112,13 @@ class _AnswerGrid extends StatelessWidget {
         mainAxisSize: MainAxisSize.min, // avoid trying to expand into unbounded height
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          button(0, gridContext),
-          const SizedBox(height: 6),
-          button(1, gridContext),
-          const SizedBox(height: 6),
-          button(2, gridContext),
-          const SizedBox(height: 6),
-          button(3, gridContext),
+          SizedBox(height: buttonHeight, child: button(0, gridContext)),
+          SizedBox(height: buttonSpacing),
+          SizedBox(height: buttonHeight, child: button(1, gridContext)),
+          SizedBox(height: buttonSpacing),
+          SizedBox(height: buttonHeight, child: button(2, gridContext)),
+          SizedBox(height: buttonSpacing),
+          SizedBox(height: buttonHeight, child: button(3, gridContext)),
         ],
       ),
     );
@@ -2144,8 +2192,8 @@ class _AnswerButtonState extends State<_AnswerButton> {
                         curve: Curves.easeOutCubic,
                         padding: const EdgeInsets.symmetric(
                           horizontal: 12,
-                          // slightly reduce height (~10% kleiner als vorher)
-                          vertical: 9,
+                          // ~15% höher als zuvor für größere Buttons
+                          vertical: 10.5,
                         ),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(14),
@@ -2186,8 +2234,8 @@ class _AnswerButtonState extends State<_AnswerButton> {
                   curve: Curves.easeOutCubic,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 12,
-                    // slightly reduced height (~10% kleiner als vorher)
-                    vertical: 9,
+                    // ~15% höher als zuvor für größere Buttons
+                    vertical: 10.5,
                   ),
                       decoration: BoxDecoration(
                         borderRadius: BorderRadius.circular(14),
