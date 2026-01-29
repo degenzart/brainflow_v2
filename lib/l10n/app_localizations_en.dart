@@ -44,7 +44,7 @@ class AppLocalizationsEn extends AppLocalizations {
   }
 
   @override
-  String get no_cards_loaded => 'No cards loaded yet.';
+  String get no_cards_loaded => 'No cards found, starting import.';
 
   @override
   String get report_title => 'Report';

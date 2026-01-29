@@ -34,6 +34,11 @@ void _forceDisableDebugPaint() {
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // Brainflow is portrait-only.
+  await SystemChrome.setPreferredOrientations(
+    <DeviceOrientation>[DeviceOrientation.portraitUp],
+  );
+
   // Ensure no debug paint overlays are enabled (purple outlines, etc.).
   _forceDisableDebugPaint();
 
@@ -217,15 +222,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
     final total = resolvedCards.length;
     final remainingRatio = total > 0 ? 1.0 : 0.0;
-    if (total > 0) {
-      await widget.repository.runAutoImportIfNeeded(
-        loadReason,
-        total,
-        remainingRatio,
-        effectiveLanguageCode,
-        _importer,
-      );
-    }
+    final importReason = total == 0 ? 'empty_db' : loadReason;
+    await widget.repository.runAutoImportIfNeeded(
+      importReason,
+      total,
+      remainingRatio,
+      effectiveLanguageCode,
+      _importer,
+    );
 
     if (!mounted) return;
     setState(() {
@@ -1993,24 +1997,41 @@ class _AnswerGrid extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final maxH = constraints.maxHeight;
-        final totalGap = answersTopGap + 3 * buttonSpacing;
-        final effectiveButtonHeight = maxH.isFinite && maxH > totalGap
-            ? ((maxH - totalGap) / 4).clamp(44.0, buttonHeight)
-            : buttonHeight;
+
+        // Robust sizing for very small available heights (prevents RenderFlex overflow).
+        // Keep layout stable, but allow gaps and button heights to shrink when necessary.
+        double topGap = answersTopGap;
+        double spacing = buttonSpacing;
+
+        const double minBtnH = 22.0; // absolute minimum to avoid overflow
+
+        double btnH = buttonHeight;
+        if (maxH.isFinite) {
+          var availableForButtons = maxH - topGap - 3 * spacing;
+
+          // If not enough room even for minimum buttons, drop gaps entirely.
+          if (availableForButtons < 4 * minBtnH) {
+            topGap = 0;
+            spacing = 0;
+            availableForButtons = maxH;
+          }
+
+          btnH = (availableForButtons / 4).clamp(minBtnH, buttonHeight);
+        }
 
         return Builder(
           builder: (gridContext) => Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              SizedBox(height: answersTopGap),
-              SizedBox(height: effectiveButtonHeight, child: button(0, gridContext)),
-              SizedBox(height: buttonSpacing),
-              SizedBox(height: effectiveButtonHeight, child: button(1, gridContext)),
-              SizedBox(height: buttonSpacing),
-              SizedBox(height: effectiveButtonHeight, child: button(2, gridContext)),
-              SizedBox(height: buttonSpacing),
-              SizedBox(height: effectiveButtonHeight, child: button(3, gridContext)),
+              SizedBox(height: topGap),
+              SizedBox(height: btnH, child: button(0, gridContext)),
+              SizedBox(height: spacing),
+              SizedBox(height: btnH, child: button(1, gridContext)),
+              SizedBox(height: spacing),
+              SizedBox(height: btnH, child: button(2, gridContext)),
+              SizedBox(height: spacing),
+              SizedBox(height: btnH, child: button(3, gridContext)),
             ],
           ),
         );

@@ -169,7 +169,7 @@ abstract class AppLocalizations {
   /// No description provided for @no_cards_loaded.
   ///
   /// In en, this message translates to:
-  /// **'No cards loaded yet.'**
+  /// **'No cards found, starting import.'**
   String get no_cards_loaded;
 
   /// No description provided for @report_title.
