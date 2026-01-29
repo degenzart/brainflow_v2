@@ -21,7 +21,7 @@
     }
   },
 
-  "no_cards_loaded": "No cards loaded yet.",
+  "no_cards_loaded": "No cards found, starting import.",
 
   "report_title": "Report",
   "report_too_hard": "Too hard",

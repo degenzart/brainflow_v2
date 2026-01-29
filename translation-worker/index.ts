@@ -37,6 +37,8 @@ type TranslateBatchResponse = {
     disallowedUnchangedAnswersIndices?: number[];
     postProcessed?: boolean;
     postProcessRulesApplied?: string[];
+    cacheStored?: boolean;
+    cacheStoreReason?: "ok" | "skipped_bad_result" | "cache_hit" | "bypass";
   };
 };
 
@@ -504,14 +506,16 @@ export default {
       `REQUEST: target=${params.target} source=${params.source} texts=${params.texts.length}`,
     );
 
+    const bypassCache = request.headers.get("x-bypass-cache") === "1";
     let cacheHit = false;
     let googleCalled = false;
 
     // Optional KV cache with build/version in key to avoid mixing old/new behavior
     const cacheKeyInput = `${CACHE_VERSION}\n${params.target}\n${params.texts.join("\n")}`;
-    const cacheKey = await sha256Hex(cacheKeyInput);
+    const cacheKeyHash = await sha256Hex(cacheKeyInput);
+    const cacheKey = `bf-v6|${params.target}|${params.source}|${cacheKeyHash}`;
 
-    if (env.TRANSLATION_CACHE) {
+    if (!bypassCache && env.TRANSLATION_CACHE) {
       const cached = await env.TRANSLATION_CACHE.get(cacheKey);
       if (cached) {
         try {
@@ -554,6 +558,8 @@ export default {
                       postProcessed: lastPostProcessedApplied,
                       postProcessRulesApplied: lastPostProcessRulesApplied,
                       issue: null,
+                      cacheStored: false,
+                      cacheStoreReason: "cache_hit",
                     }
                   : undefined,
             };
@@ -682,13 +688,20 @@ export default {
                 disallowedUnchangedAnswersIndices,
                 postProcessed: lastPostProcessedApplied,
                 postProcessRulesApplied: lastPostProcessRulesApplied,
+                cacheStored: false,
+                cacheStoreReason: bypassCache ? "bypass" : "skipped_bad_result",
               }
             : undefined,
         };
         return json(resp, { status: 200 });
       }
 
-      if (env.TRANSLATION_CACHE) {
+      const mayStore =
+        !bypassCache &&
+        lastPostProcessedApplied === true &&
+        lastProtectionApplied === true &&
+        googleCalled === true;
+      if (mayStore && env.TRANSLATION_CACHE) {
         const payload = {
           build: CACHE_VERSION,
           translated,
@@ -715,6 +728,8 @@ export default {
               disallowedUnchangedAnswersIndices,
               postProcessed: lastPostProcessedApplied,
               postProcessRulesApplied: lastPostProcessRulesApplied,
+              cacheStored: mayStore,
+              cacheStoreReason: bypassCache ? "bypass" : mayStore ? "ok" : "skipped_bad_result",
             }
           : undefined,
       };

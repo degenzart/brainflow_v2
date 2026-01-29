@@ -2,7 +2,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter/foundation.dart' show debugPrint;
 
 import 'card_model.dart';
-import 'seed_cards.dart';
 import '../import/trivia_importer.dart';
 import '../translation/proxy_translation_client.dart';
 
@@ -13,7 +12,6 @@ class CardRepository {
       Uri.parse('https://brainflow-translate.bjdybkw57j.workers.dev');
 
   static const String _cardsKey = 'cards_v1';
-  static const String _seedPersistedKey = 'seed_persisted_v1';
   static const String _importDoneKey = 'auto_import_done_v1';
   static const String _autoImportLastAtKey = 'auto_import_last_at_v1';
   static const String _autoImportLastReasonKey = 'auto_import_last_reason_v1';
@@ -64,18 +62,8 @@ class CardRepository {
     }
   }
 
-  /// Ensures seed cards are persisted if storage is empty
-  Future<void> ensureSeed() async {
-    final existing = await load();
-    if (existing.isNotEmpty) return; // Already has cards
-
-    final seedPersisted = _prefs.getBool(_seedPersistedKey) ?? false;
-    if (seedPersisted) return; // Seed already persisted
-
-    // Persist seed cards
-    await save(seedCards);
-    await _prefs.setBool(_seedPersistedKey, true);
-  }
+  /// No-op: seed/demo cards disabled; only importer fills DB.
+  Future<void> ensureSeed() async {}
 
   /// Resolves a card for a specific locale
   /// Returns a new CardModel with question/answers/correctAnswer from translation if available
