@@ -4,7 +4,6 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -180,8 +179,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _loadCards();
-    // Reload cards when locale changes
+    _loadCards(loadReason: 'startup');
     widget.localeController.addListener(_onLocaleChanged);
   }
 
@@ -192,14 +190,12 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _onLocaleChanged() {
-    _loadCards();
+    _loadCards(loadReason: 'language_change');
   }
 
-  Future<void> _loadCards() async {
-    // Ensure seed cards are persisted if storage is empty
+  Future<void> _loadCards({String loadReason = 'startup'}) async {
     await widget.repository.ensureSeed();
 
-    // Load raw cards
     final rawCards = await widget.repository.load();
     if (!mounted) return;
 
@@ -212,7 +208,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ? 'en'
         : currentLanguageCode;
 
-    // Resolve cards for current locale
     final resolvedCards = rawCards
         .map(
           (card) =>
@@ -220,21 +215,26 @@ class _HomeScreenState extends State<HomeScreen> {
         )
         .toList(growable: false);
 
-    // Check if we need to download more (placeholder for future)
     final total = resolvedCards.length;
-    final remaining = total; // In real implementation, track remaining cards
+    final remainingRatio = total > 0 ? 1.0 : 0.0;
     if (total > 0) {
-      await widget.repository.maybeDownloadMoreIfLow(
-        localeCode: effectiveLanguageCode,
-        remaining: remaining,
-        total: total,
+      await widget.repository.runAutoImportIfNeeded(
+        loadReason,
+        total,
+        remainingRatio,
+        effectiveLanguageCode,
+        _importer,
       );
     }
 
+    if (!mounted) return;
     setState(() {
       _cards = resolvedCards;
       _loading = false;
     });
+    debugPrint(
+      'LOAD_CARDS_DONE raw=${rawCards.length} resolved=${resolvedCards.length} lang=$effectiveLanguageCode',
+    );
   }
 
   Future<void> _runImport() async {
@@ -245,10 +245,6 @@ class _HomeScreenState extends State<HomeScreen> {
     messenger.showSnackBar(SnackBar(content: Text(l10n.import_running)));
 
     try {
-      final imported = await _importer.fetch(amount: 25);
-      final result = await widget.repository.mergeAndPersist(imported);
-
-      if (!mounted) return;
       final systemLanguageCode =
           WidgetsBinding.instance.platformDispatcher.locale.languageCode;
       final currentLanguageCode =
@@ -256,16 +252,23 @@ class _HomeScreenState extends State<HomeScreen> {
               .toLowerCase();
       final effectiveLanguageCode =
           currentLanguageCode.isEmpty ? 'en' : currentLanguageCode;
-      final resolvedCards = result.cards
+      await widget.repository.runImportPipeline(_importer, effectiveLanguageCode);
+
+      if (!mounted) return;
+      final rawCards = await widget.repository.load();
+      final resolvedCards = rawCards
           .map((c) => widget.repository.resolveForLocale(c, effectiveLanguageCode))
           .toList(growable: false);
       setState(() {
         _cards = resolvedCards;
       });
+      debugPrint(
+        'IMPORT_UI_REFRESH_DONE cards=${_cards.length} lang=$effectiveLanguageCode',
+      );
 
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(
-        SnackBar(content: Text(l10n.import_done(result.newCount))),
+        SnackBar(content: Text(l10n.import_done(resolvedCards.length))),
       );
     } catch (e) {
       messenger.hideCurrentSnackBar();
@@ -498,6 +501,22 @@ class _HomeScreenState extends State<HomeScreen> {
                               cards: _cards,
                               onReport: _openReportSheet,
                               hapticsEnabled: _hapticsEnabled,
+                              onConsumed: (currentIndex, total) {
+                                widget.repository.incrementCardsConsumedSinceImport();
+                                if (widget.repository.cardsConsumedSinceImport % 10 != 0) return;
+                                final remaining = total - currentIndex;
+                                final remainingRatio = total > 0 ? remaining / total : 0.0;
+                                final systemCode = WidgetsBinding.instance.platformDispatcher.locale.languageCode;
+                                final code = (widget.localeController.locale?.languageCode ?? systemCode).toLowerCase();
+                                final effectiveLang = code.isEmpty ? 'en' : code;
+                                widget.repository.runAutoImportIfNeeded(
+                                  'consumed',
+                                  total,
+                                  remainingRatio,
+                                  effectiveLang,
+                                  _importer,
+                                );
+                              },
                             ),
                     ),
                     Positioned(
@@ -1160,11 +1179,13 @@ class _FlowView extends StatefulWidget {
     required this.cards,
     required this.onReport,
     required this.hapticsEnabled,
+    this.onConsumed,
   });
 
   final List<CardModel> cards;
   final Future<void> Function(CardModel card) onReport;
   final bool hapticsEnabled;
+  final void Function(int currentIndex, int total)? onConsumed;
 
   @override
   State<_FlowView> createState() => _FlowViewState();
@@ -1403,20 +1424,12 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
           _answerLocked = false;
           _feedback = _FlowFeedback.none;
           _swipeConsumed = false;
-          // Reset answer feedback state for new card
           _selectedAnswer = null;
           _isAnswered = false;
           _isCorrectlyAnswered = false;
         });
 
-        // Check if we need to download more cards (placeholder)
-        if (widget.cards.isNotEmpty) {
-          final remaining = widget.cards.length - actualIndex;
-          final total = widget.cards.length;
-          if (remaining / total < 0.30) {
-            // Would trigger server download in the future
-          }
-        }
+        widget.onConsumed?.call(actualIndex, widget.cards.length);
       },
       itemBuilder: (context, index) {
         // Wrap around to actual card index
