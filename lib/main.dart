@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' show ImageFilter;
 
+import 'package:auto_size_text/auto_size_text.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -1659,14 +1660,15 @@ class _FlowCard extends StatelessWidget {
   final String? selectedAnswer;
   final bool isCorrectlyAnswered;
 
-  // Fixed layout metrics for the Flow card
+  // Fixed layout metrics for the Flow card (answers get priority so question can shrink)
   static const double _iconZoneBaseHeight = 72.0;
-  static const double _questionZoneBaseHeight = 230.0;
-  static const double _answersZoneBaseHeight = 280.0;
+  static const double _questionZoneBaseHeight = 200.0;
+  static const double _answersZoneBaseHeight = 300.0;
 
-  // Answer button metrics
-  static const double _answerButtonHeight = 60.0;
-  static const double _answerButtonSpacing = 10.0;
+  // Answer button metrics (stable, no "wandering")
+  static const double _answerButtonHeight = 64.0;
+  static const double _answerButtonSpacing = 12.0;
+  static const double _answersTopGap = 10.0;
 
   @override
   Widget build(BuildContext context) {
@@ -1696,7 +1698,7 @@ class _FlowCard extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Zone 1: Category icon at the top, fixed-ish height
+            // Zone 1: Category icon at the top, fixed height
             SizedBox(
               height: iconZoneHeight,
               child: Center(
@@ -1714,55 +1716,64 @@ class _FlowCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            // Zone 2: Question box with fixed height; text auto-fits inside
-            SizedBox(
-              height: questionZoneHeight,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                decoration: BoxDecoration(
-                  color: cs.surface.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: style.color.withValues(alpha: 0.18),
-                    width: 1,
+            // Zone 2: Question box with max height; can shrink so answers always fit
+            Flexible(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: questionZoneHeight),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  decoration: BoxDecoration(
+                    color: cs.surface.withValues(alpha: 0.45),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                      color: style.color.withValues(alpha: 0.18),
+                      width: 1,
+                    ),
                   ),
-                ),
-                child: Center(
-                  child: _AutoFitText(
-                    text: card.question,
-                    textAlign: TextAlign.center,
-                    maxLines: 5,
-                    minFontSize: 10.0,
-                    maxFontSize: 20.0,
-                    style: theme.textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
+                  child: Center(
+                    child: _AutoFitText(
+                      text: card.question,
+                      textAlign: TextAlign.center,
+                      maxLines: 5,
+                      minFontSize: 10.0,
+                      maxFontSize: 20.0,
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                 ),
               ),
             ),
             const SizedBox(height: 12),
-            // Zone 3: Answers box with fixed height; 4 equal-height buttons live inside
-            SizedBox(
-              height: answersZoneHeight,
-              child: Align(
-                alignment: Alignment.bottomCenter,
-                child: _AnswerGrid(
-                  answers: card.answers.take(4).toList(growable: false),
-                  correctIndex: () {
-                    final visibleAnswers =
-                        card.answers.take(4).toList(growable: false);
-                    final idx = visibleAnswers.indexOf(card.correctAnswer);
-                    return idx >= 0 ? idx : 0;
-                  }(),
-                  locked: locked,
-                  onAnswer: onAnswer,
-                  isAnswered: isAnswered,
-                  selectedAnswer: selectedAnswer,
-                  isCorrectlyAnswered: isCorrectlyAnswered,
-                  buttonHeight: _answerButtonHeight,
-                  buttonSpacing: _answerButtonSpacing,
+            // Zone 3: Answers in bounded Expanded; SafeArea + bottom padding so last button is never cut
+            Expanded(
+              child: SafeArea(
+                bottom: true,
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 20),
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: _AnswerGrid(
+                      answers: card.answers.take(4).toList(growable: false),
+                      correctIndex: () {
+                        final visibleAnswers =
+                            card.answers.take(4).toList(growable: false);
+                        final idx =
+                            visibleAnswers.indexOf(card.correctAnswer);
+                        return idx >= 0 ? idx : 0;
+                      }(),
+                      locked: locked,
+                      onAnswer: onAnswer,
+                      isAnswered: isAnswered,
+                      selectedAnswer: selectedAnswer,
+                      isCorrectlyAnswered: isCorrectlyAnswered,
+                      buttonHeight: _answerButtonHeight,
+                      buttonSpacing: _answerButtonSpacing,
+                      answersTopGap: _answersTopGap,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -1905,6 +1916,7 @@ class _AnswerGrid extends StatelessWidget {
     required this.isCorrectlyAnswered,
     required this.buttonHeight,
     required this.buttonSpacing,
+    this.answersTopGap = 10.0,
   });
 
   final List<String> answers;
@@ -1916,6 +1928,7 @@ class _AnswerGrid extends StatelessWidget {
   final bool isCorrectlyAnswered;
   final double buttonHeight;
   final double buttonSpacing;
+  final double answersTopGap;
 
   @override
   Widget build(BuildContext context) {
@@ -1964,20 +1977,31 @@ class _AnswerGrid extends StatelessWidget {
       );
     }
 
-    return Builder(
-      builder: (gridContext) => Column(
-        mainAxisSize: MainAxisSize.min, // avoid trying to expand into unbounded height
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          SizedBox(height: buttonHeight, child: button(0, gridContext)),
-          SizedBox(height: buttonSpacing),
-          SizedBox(height: buttonHeight, child: button(1, gridContext)),
-          SizedBox(height: buttonSpacing),
-          SizedBox(height: buttonHeight, child: button(2, gridContext)),
-          SizedBox(height: buttonSpacing),
-          SizedBox(height: buttonHeight, child: button(3, gridContext)),
-        ],
-      ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maxH = constraints.maxHeight;
+        final totalGap = answersTopGap + 3 * buttonSpacing;
+        final effectiveButtonHeight = maxH.isFinite && maxH > totalGap
+            ? ((maxH - totalGap) / 4).clamp(44.0, buttonHeight)
+            : buttonHeight;
+
+        return Builder(
+          builder: (gridContext) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              SizedBox(height: answersTopGap),
+              SizedBox(height: effectiveButtonHeight, child: button(0, gridContext)),
+              SizedBox(height: buttonSpacing),
+              SizedBox(height: effectiveButtonHeight, child: button(1, gridContext)),
+              SizedBox(height: buttonSpacing),
+              SizedBox(height: effectiveButtonHeight, child: button(2, gridContext)),
+              SizedBox(height: buttonSpacing),
+              SizedBox(height: effectiveButtonHeight, child: button(3, gridContext)),
+            ],
+          ),
+        );
+      },
     );
   }
 }
@@ -2066,16 +2090,17 @@ class _AnswerButtonState extends State<_AnswerButton> {
                           ),
                         ),
                         child: Center(
-                          child: Text(
+                          child: AutoSizeText(
                             widget.label,
                             maxLines: 2,
+                            minFontSize: 13,
+                            maxFontSize: 20,
                             overflow: TextOverflow.ellipsis,
                             textAlign: TextAlign.center,
                             style: Theme.of(context)
                                 .textTheme
                                 .bodyMedium
                                 ?.copyWith(
-                                  fontSize: 16.8,
                                   fontWeight: FontWeight.w700,
                                   color: Theme.of(context)
                                       .colorScheme
@@ -2117,16 +2142,17 @@ class _AnswerButtonState extends State<_AnswerButton> {
                             : null,
                       ),
                       child: Center(
-                        child: Text(
+                        child: AutoSizeText(
                           widget.label,
                           maxLines: 2,
+                          minFontSize: 13,
+                          maxFontSize: 20,
                           overflow: TextOverflow.ellipsis,
                           textAlign: TextAlign.center,
                           style: Theme.of(context)
                               .textTheme
                               .bodyMedium
                               ?.copyWith(
-                                fontSize: 16.8,
                                 fontWeight: FontWeight.w700,
                                 color: widget.shouldHighlight
                                     ? Colors.white
@@ -2134,7 +2160,8 @@ class _AnswerButtonState extends State<_AnswerButton> {
                                         .colorScheme
                                         .onSurface
                                         .withValues(
-                                          alpha: widget.enabled ? 0.95 : 0.45,
+                                          alpha:
+                                              widget.enabled ? 0.95 : 0.45,
                                         ),
                               ),
                         ),
