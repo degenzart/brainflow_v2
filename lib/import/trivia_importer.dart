@@ -23,14 +23,8 @@ const List<int> _retryDelaysSec = [2, 4, 8];
 const int _maxRetries = 3;
 const int _jitterMsMax = 300;
 
-/// DE path fallback order (try until one returns 200).
-const List<String> _dePaths = ['/api.php', '/api/v1/api.php', '/api'];
-
 class TriviaImporter {
   const TriviaImporter();
-
-  /// Session-only: skip DE source after all paths returned 404 (no retry this run).
-  static bool _deDisabledThisSession = false;
 
   /// Fetch EN cards from OpenTDB-compatible API (opentdb.com). Cap = max for this run (use kEnChunkPerRun for auto-import).
   /// On 429: Retry-After header if present, else backoff + jitter; max retries then giveup with url.
@@ -124,126 +118,9 @@ class TriviaImporter {
     return normalized.kept;
   }
 
-  /// Fetch DE cards from opentrivia.de. Tries path fallback; valid path = 200 + JSON (Content-Type or body starts with {).
-  /// On all 404 or non-JSON: disables source for session, logs once SOURCE_DISABLED_TEMP reason=non_json_or_404.
+  /// DE source (opentrivia.de) disabled; use EN + translate for DE.
   Future<List<CardModel>> fetchDE({int cap = kDeCap}) async {
-    const source = 'opentrivia.de';
-    const sourceLanguage = 'de';
-    if (_deDisabledThisSession) return [];
-
-    final chunk = cap.clamp(1, kDeCap);
-    debugPrint('IMPORT_START source=$source language=$sourceLanguage chunk=$chunk cap=$kDeCap');
-
-    final client = HttpClient();
-    final allRaw = <Map<String, dynamic>>[];
-    var lastHttpStatus = 0;
-    Uri? lastUri;
-    String? workingPath;
-    var failNonJson = false;
-    try {
-      for (final path in _dePaths) {
-        lastUri = Uri.https('opentrivia.de', path, <String, String>{
-          'amount': '$_requestBatchSize',
-          'type': 'multiple',
-        });
-        final req = await client.getUrl(lastUri);
-        req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-        req.headers.set('Accept-Language', 'de');
-        final res = await req.close();
-        lastHttpStatus = res.statusCode;
-        if (res.statusCode == 404) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source status=404 url=$lastUri');
-          continue;
-        }
-        if (res.statusCode != 200) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source status=${res.statusCode} url=$lastUri');
-          continue;
-        }
-        final body = await res.transform(utf8.decoder).join();
-        final trimmed = body.trim();
-        final contentType = res.headers.value('content-type')?.toLowerCase() ?? '';
-        final looksJson = contentType.contains('application/json') || trimmed.startsWith('{');
-        final looksHtml = trimmed.startsWith('<');
-        if (looksHtml || !looksJson) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source status=200 url=$lastUri reason=non_json');
-          continue;
-        }
-        workingPath = path;
-        break;
-      }
-      if (workingPath == null) {
-        _deDisabledThisSession = true;
-        debugPrint('SOURCE_DISABLED_TEMP source=$source reason=non_json_or_404');
-        return [];
-      }
-      int requested = 0;
-      while (requested < cap) {
-        final amount = (cap - requested).clamp(1, _requestBatchSize);
-        final uri = Uri.https('opentrivia.de', workingPath, <String, String>{
-          'amount': '$amount',
-          'type': 'multiple',
-        });
-        lastUri = uri;
-        final req = await client.getUrl(uri);
-        req.headers.set(HttpHeaders.acceptHeader, 'application/json');
-        req.headers.set('Accept-Language', 'de');
-        final res = await req.close();
-        lastHttpStatus = res.statusCode;
-        if (res.statusCode == 404) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source status=404 url=$uri');
-          _deDisabledThisSession = true;
-          debugPrint('SOURCE_DISABLED_TEMP source=$source reason=non_json_or_404');
-          break;
-        }
-        if (res.statusCode != 200) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source status=${res.statusCode} url=$uri');
-          break;
-        }
-        final body = await res.transform(utf8.decoder).join();
-        Map<String, dynamic> decoded;
-        try {
-          decoded = jsonDecode(body) as Map<String, dynamic>;
-        } on FormatException {
-          _deDisabledThisSession = true;
-          debugPrint('IMPORT_FETCH_FAIL source=$source reason=non_json url=$uri');
-          debugPrint('SOURCE_DISABLED_TEMP source=$source reason=non_json');
-          failNonJson = true;
-          break;
-        }
-        final responseCode = decoded['response_code'] as int?;
-        if (responseCode != 0) {
-          debugPrint('IMPORT_FETCH_FAIL source=$source response_code=$responseCode url=$uri');
-          break;
-        }
-        final results = decoded['results'] as List<dynamic>?;
-        if (results == null || results.isEmpty) break;
-        for (final r in results) {
-          if (r is Map<String, dynamic>) allRaw.add(r);
-        }
-        requested += results.length;
-        if (results.length < amount) break;
-      }
-      if (allRaw.isNotEmpty) {
-        debugPrint('IMPORT_FETCH_OK source=$source received=${allRaw.length}');
-      }
-    } catch (e, st) {
-      debugPrint('IMPORT_FETCH_EXCEPTION source=$source error=$e url=$lastUri');
-      if (kDebugMode) debugPrint('$st');
-    } finally {
-      client.close(force: true);
-    }
-
-    final normalized = normalize(allRaw, sourceLanguage, source);
-    debugPrint(
-      'IMPORT_NORMALIZED_OK source=$source kept=${normalized.kept.length} dropped=${normalized.dropped}'
-      '${normalized.droppedReasons.isNotEmpty ? " reasons=${normalized.droppedReasons}" : ""}',
-    );
-    final status = failNonJson ? 'fail_non_json' : (allRaw.isEmpty ? 'fail' : 'ok');
-    final urlLog = lastUri?.toString() ?? '';
-    debugPrint(
-      'IMPORT_SOURCE_RESULT source=$source status=$status http=$lastHttpStatus received=${allRaw.length} kept=${normalized.kept.length} dropped=${normalized.dropped} retries=0 url=$urlLog',
-    );
-    return normalized.kept;
+    return [];
   }
 
   /// Normalize raw API items into CardModels. Decode HTML, filter bad data, stable IDs.
