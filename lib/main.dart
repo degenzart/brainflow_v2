@@ -166,13 +166,10 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final _importer = const TriviaImporter();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
-  static bool _didLogAddedTranslationsCount = false;
-  static final Set<String> _didLogTranslationPersistForLang = <String>{};
 
   var _section = DrawerSection.flow;
   var _loading = true;
   List<CardModel> _cards = const <CardModel>[];
-  bool _persistingTranslations = false;
 
   // Settings state
   bool _hapticsEnabled = true;
@@ -237,156 +234,6 @@ class _HomeScreenState extends State<HomeScreen> {
       _cards = resolvedCards;
       _loading = false;
     });
-
-    // Background: persist missing translations for the active language.
-    unawaited(
-      _persistMissingTranslationsIfNeeded(
-        rawCards: rawCards,
-        targetLang: effectiveLanguageCode,
-      ),
-    );
-  }
-
-  Future<void> _persistMissingTranslationsIfNeeded({
-    required List<CardModel> rawCards,
-    required String targetLang,
-  }) async {
-    if (_persistingTranslations) return;
-
-    final lang = targetLang.split('_').first.toLowerCase().trim();
-    if (lang.isEmpty || lang == 'en' || lang == 'system') return;
-
-    // Quick pre-check: do we have any card that actually needs a translation?
-    final needsAny = rawCards.any((c) {
-      if (lang == c.sourceLanguage) return false;
-      final t = c.translations;
-      return t == null || !t.containsKey(lang);
-    });
-    if (!needsAny) return;
-
-    _persistingTranslations = true;
-    var addedTranslationsCount = 0;
-
-    try {
-      final client = widget.repository.createTranslationClient();
-      final updatedCards = <CardModel>[];
-      var changed = false;
-
-      for (final card in rawCards) {
-        // Never translate if targetLang equals source language.
-        if (lang == card.sourceLanguage) {
-          updatedCards.add(card);
-          continue;
-        }
-
-        final existing = card.translations;
-        if (existing != null && existing.containsKey(lang)) {
-          updatedCards.add(card);
-          continue;
-        }
-
-        final texts = <String>[card.question, ...card.answers];
-
-        List<String> translated;
-        try {
-          translated = await client.translateBatch(
-            texts: texts,
-            targetLang: lang,
-            sourceLang: 'auto',
-          );
-        } catch (_) {
-          // Failsafe: do not persist on failure.
-          updatedCards.add(card);
-          continue;
-        }
-
-        if (translated.length != texts.length) {
-          updatedCards.add(card);
-          continue;
-        }
-
-        final translatedQuestion = translated.first;
-        final translatedAnswers = translated.sublist(1);
-
-        final correctIndex = card.answers.indexOf(card.correctAnswer);
-        final translation = CardText(
-          question: translatedQuestion,
-          answers: translatedAnswers,
-          correctIndex: correctIndex >= 0 ? correctIndex : 0,
-          version: 1,
-        );
-
-        final merged = <String, CardText>{};
-        if (existing != null) merged.addAll(existing);
-        merged[lang] = translation;
-
-        updatedCards.add(
-          CardModel(
-            id: card.id,
-            question: card.question,
-            answers: card.answers,
-            correctAnswer: card.correctAnswer,
-            sourceLanguage: card.sourceLanguage,
-            category: card.category,
-            difficulty: card.difficulty,
-            createdAt: card.createdAt,
-            source: card.source,
-            translations: merged,
-          ),
-        );
-
-        changed = true;
-        addedTranslationsCount++;
-      }
-
-      if (!changed) return;
-
-      // Persist once (batch) for all updated cards.
-      await widget.repository.save(updatedCards);
-
-      // Debug-only: verify that persisted translations for this language can be read back.
-      if (kDebugMode && !_didLogTranslationPersistForLang.contains(lang)) {
-        _didLogTranslationPersistForLang.add(lang);
-        try {
-          final reloaded = await widget.repository.load();
-          final savedIds = <String>{for (final c in updatedCards) c.id};
-          var verified = 0;
-          for (final c in reloaded) {
-            if (!savedIds.contains(c.id)) continue;
-            final tr = c.translations;
-            if (tr != null && tr[lang] != null) {
-              verified++;
-            }
-          }
-          debugPrint(
-            'TRANSLATION_PERSIST_CHECK: lang=$lang '
-            'saved=${updatedCards.length} verified=$verified',
-          );
-        } catch (_) {
-          // Never crash on debug checks.
-        }
-      }
-
-      if (!mounted) return;
-      // Update UI with resolved cards (now that translations exist).
-      final resolved = updatedCards
-          .map((c) => widget.repository.resolveForLocale(c, lang))
-          .toList(growable: false);
-      setState(() {
-        _cards = resolved;
-      });
-
-      if (!_didLogAddedTranslationsCount) {
-        _didLogAddedTranslationsCount = true;
-        debugPrint(
-          'ADDED TRANSLATIONS: addedTranslationsCount=$addedTranslationsCount',
-        );
-      }
-    } catch (_) {
-      // Hard failsafe: never crash.
-    } finally {
-      _persistingTranslations = false;
-    }
   }
 
   Future<void> _runImport() async {
@@ -401,8 +248,18 @@ class _HomeScreenState extends State<HomeScreen> {
       final result = await widget.repository.mergeAndPersist(imported);
 
       if (!mounted) return;
+      final systemLanguageCode =
+          WidgetsBinding.instance.platformDispatcher.locale.languageCode;
+      final currentLanguageCode =
+          (widget.localeController.locale?.languageCode ?? systemLanguageCode)
+              .toLowerCase();
+      final effectiveLanguageCode =
+          currentLanguageCode.isEmpty ? 'en' : currentLanguageCode;
+      final resolvedCards = result.cards
+          .map((c) => widget.repository.resolveForLocale(c, effectiveLanguageCode))
+          .toList(growable: false);
       setState(() {
-        _cards = result.cards;
+        _cards = resolvedCards;
       });
 
       messenger.hideCurrentSnackBar();
