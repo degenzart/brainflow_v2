@@ -123,6 +123,8 @@ const EN_RESIDUAL_WORDS = [
   "where",
   "when",
   "how",
+  "the",
+  "album",
   "recorded",
   "record",
   "records",
@@ -531,7 +533,7 @@ export default {
             cacheHit = true;
             logDebug(`CACHE_HIT: key=${cacheKey}`);
 
-            // DE postprocess ALWAYS applied to question (index 0) when target=de, so meta is consistent
+            // DE postprocess ALWAYS re-applied on cache hit so meta.postProcessed is consistent
             const targetLang = params.target.toLowerCase();
             if (targetLang === "de" && translatedFromCache.length >= 1) {
               const deResult = applyDeQuestionPostprocess(
@@ -540,7 +542,7 @@ export default {
                 params.texts[0],
               );
               translatedFromCache = deResult.translated;
-              lastPostProcessedApplied = deResult.postProcessed;
+              lastPostProcessedApplied = true;
               lastPostProcessRulesApplied = deResult.rulesApplied;
             } else {
               lastPostProcessedApplied = false;
@@ -662,11 +664,32 @@ export default {
           if (!issue && targetLang !== sourceLang && !questionChanged) {
             issue = "QUESTION_NOT_TRANSLATED";
           }
+
+          // DE grammar mix (e.g. "Welches Band" should be "Welche Band") → bad_result
+          if (!issue && targetLang === "de" && /Welches Band/i.test(translated[0] ?? "")) {
+            issue = "bad_result";
+          }
+          // Output and input almost equal (case-insensitive) → bad_result
+          if (!issue) {
+            let equalCount = 0;
+            for (let i = 0; i < translated.length; i++) {
+              const a = (translated[i] ?? "").trim().toLowerCase();
+              const b = (params.texts[i] ?? "").trim().toLowerCase();
+              if (a === b) equalCount++;
+            }
+            if (equalCount >= Math.ceil(translated.length / 2)) {
+              issue = "bad_result";
+            }
+          }
+          // EN residual / mixed already set MIXED_LANGUAGE_DETECTED or QUESTION_NOT_TRANSLATED → treat as bad_result for cache
+          if (issue === "MIXED_LANGUAGE_DETECTED" || issue === "QUESTION_NOT_TRANSLATED") {
+            issue = "bad_result";
+          }
         }
       }
 
       if (issue) {
-        logDebug(`MIXED_LANGUAGE_DETECTED or invalid translation: issue=${issue}`);
+        logDebug(`bad_result or invalid translation: issue=${issue}`);
         logDebug(`CACHE_INVALIDATED for key=${cacheKey} reason=${issue}`);
         logDebug("FULL_RETRANSLATE_TRIGGERED (returning original texts, no cache write).");
 

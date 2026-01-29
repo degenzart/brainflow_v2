@@ -1,5 +1,5 @@
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 
 import 'card_model.dart';
 import '../import/trivia_importer.dart';
@@ -8,8 +8,7 @@ import '../translation/proxy_translation_client.dart';
 class CardRepository {
   CardRepository(this._prefs);
 
-  static final Uri _translationWorkerBaseUrl =
-      Uri.parse('https://brainflow-translate.bjdybkw57j.workers.dev');
+  static bool _workerBaseLogged = false;
 
   static const String _cardsKey = 'cards_v1';
   static const String _importDoneKey = 'auto_import_done_v1';
@@ -47,7 +46,14 @@ class CardRepository {
   }
 
   ProxyTranslationClient createTranslationClient() {
-    return ProxyTranslationClient(baseUrl: _translationWorkerBaseUrl);
+    final baseUrl = kDebugMode
+        ? Uri.parse('http://localhost:8788')
+        : Uri.parse('https://brainflow-translate.bjdybkw57j.workers.dev');
+    if (!_workerBaseLogged) {
+      debugPrint('TRANSLATION_WORKER_BASE=${baseUrl.host}');
+      _workerBaseLogged = true;
+    }
+    return ProxyTranslationClient(baseUrl: baseUrl);
   }
 
   Future<List<CardModel>> load() async {
@@ -338,39 +344,18 @@ class CardRepository {
     return result;
   }
 
-  /// Full import pipeline by effective language. DE: ensure ≥700 native DE, then add EN+translation.
-  /// Non-DE: import EN from opentdb.com, translate, merge. Logs IMPORT_SOURCE_RESULT per source (from importer).
+  /// Full import pipeline: EN from opentdb.com + translate (de/es), merge. DE via translate (opentrivia.de disabled).
   /// Returns result on success, null on failure.
   Future<ImportPipelineResult?> runImportPipeline(TriviaImporter importer, String effectiveLang) async {
-    final lang = effectiveLang.trim().toLowerCase().isEmpty ? 'en' : effectiveLang.trim().toLowerCase();
     final stopwatch = Stopwatch()..start();
     var totalNew = 0;
     try {
-      if (lang == 'de') {
-        final existing = await load();
-        var deCount = existing.where((c) => c.sourceLanguage == 'de').length;
-        if (deCount < kMinDeNative) {
-          final deCards = await importer.fetchDE(cap: kDeCap);
-          final mergeDe = await mergeAndPersistRaw(deCards);
-          totalNew += mergeDe.newCount;
-          debugPrint('IMPORT_MERGE_DONE new=${mergeDe.newCount} total=${mergeDe.cards.length}');
-          deCount = (await load()).where((c) => c.sourceLanguage == 'de').length;
-        }
-        final totalAfterDe = (await load()).length;
-        if (totalAfterDe < kTargetTotal) {
-          final enCards = await importer.fetchEN(cap: kEnChunkPerRun);
-          final enTranslated = await translateEnCardsStrict(enCards);
-          final mergeEn = await mergeAndPersistRaw(enTranslated);
-          totalNew += mergeEn.newCount;
-          debugPrint('IMPORT_MERGE_DONE new=${mergeEn.newCount} total=${mergeEn.cards.length}');
-        }
-      } else {
-        final enCards = await importer.fetchEN(cap: kEnChunkPerRun);
-        final enTranslated = await translateEnCardsStrict(enCards);
-        final mergeEn = await mergeAndPersistRaw(enTranslated);
-        totalNew += mergeEn.newCount;
-        debugPrint('IMPORT_MERGE_DONE new=${mergeEn.newCount} total=${mergeEn.cards.length}');
-      }
+      // DE via EN + translate (opentrivia.de disabled)
+      final enCards = await importer.fetchEN(cap: kEnChunkPerRun);
+      final enTranslated = await translateEnCardsStrict(enCards);
+      final mergeEn = await mergeAndPersistRaw(enTranslated);
+      totalNew += mergeEn.newCount;
+      debugPrint('IMPORT_MERGE_DONE new=${mergeEn.newCount} total=${mergeEn.cards.length}');
 
       await _prefs.setBool(_importDoneKey, true);
       final all = await load();
