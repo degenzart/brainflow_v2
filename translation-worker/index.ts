@@ -6,8 +6,8 @@ export interface Env {
   TRANSLATION_CACHE?: KVNamespace;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.2";
-const CACHE_VERSION = "bf-dev-answers-v7.2";
+const DEBUG_BUILD = "bf-dev-answers-v7.3";
+const CACHE_VERSION = "bf-dev-answers-v7.3";
 
 let debugLoggingEnabled = false;
 

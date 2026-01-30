@@ -8,6 +8,13 @@ const KNOWN_BRAND_PATTERNS = [
   /\b(AC\/DC|U2|R.E\.M|OK Computer|NASA|BBC|NBA|NFL|IBM|HP|UK|USA)\b/i,
   /\b(iPhone|eBay|iPad|YouTube|Facebook|Google|Spotify|Netflix)\b/i,
 ];
+// Country/region names that must be translated; do NOT protect these (mirror DE).
+const KNOWN_TRANSLATABLE = new Set([
+  "europe", "asia", "africa", "america", "germany", "italy", "france", "spain", "austria",
+  "england", "russia", "china", "japan", "brazil", "india", "australia", "canada", "mexico",
+  "netherlands", "belgium", "switzerland", "sweden", "norway", "denmark", "finland", "poland",
+  "greece", "portugal", "ireland", "scotland", "wales", "uk", "usa", "united states", "united kingdom",
+]);
 
 function normalize(s: string): string {
   return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -25,7 +32,13 @@ function shouldProtectAnswerES(answer: string): boolean {
   if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
   if (/[.&\/\-']/.test(t)) return true;
   const tokens = t.split(/\s+/).filter(Boolean);
+  if (tokens.length >= 2) return true;
   if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
+  // Single-word capitalized proper nouns (e.g. Oasis, Beatles, Mozart) — min length 4, exclude translatable terms
+  if (tokens.length === 1 && t.length >= 4 && t.length <= 12) {
+    if (/^[A-Z][a-z]+$/.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
+    if (/^[A-Z]\p{L}+$/u.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
+  }
   for (const re of KNOWN_BRAND_PATTERNS) {
     if (re.test(t)) return true;
   }
