@@ -1,14 +1,12 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+
 import 'translation_client.dart';
 
 /// Minimal proxy client: always calls a fixed Worker base URL.
-///
-/// - No SharedPreferences
-/// - No flags/settings
-/// - No caching/retries
-/// - Errors throw (callsite already catches)
+/// Uses HttpClient with findProxy = DIRECT so translation requests never use a system proxy (avoids localhost:55xxx).
 class ProxyTranslationClient implements TranslationClient {
   ProxyTranslationClient({required Uri baseUrl}) : _baseUrl = baseUrl;
 
@@ -34,7 +32,11 @@ class ProxyTranslationClient implements TranslationClient {
   }) async {
     final uri = _translateBatchUri();
     final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 10);
+    client.findProxy = (_) => 'DIRECT';
+    client.connectionTimeout = const Duration(seconds: 15);
+    if (kDebugMode) {
+      debugPrint('TRANSLATION_HTTP uri=${uri.host} proxy=DIRECT');
+    }
 
     try {
       final req = await client.postUrl(uri);

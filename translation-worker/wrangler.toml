@@ -3,6 +3,8 @@ main = "index.ts"
 compatibility_date = "2025-01-01"
 
 # Optional KV cache (recommended)
+# Run: npx wrangler kv namespace create TRANSLATION_CACHE
+# Then replace the id below with the returned id from the command output.
 kv_namespaces = [
   { binding = "TRANSLATION_CACHE", id = "REPLACE_WITH_KV_NAMESPACE_ID" }
 ]

@@ -199,9 +199,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadCards({String loadReason = 'startup'}) async {
-    await widget.repository.ensureSeed();
+    if (mounted) {
+      setState(() {
+        _loading = true;
+      });
+    }
 
-    final rawCards = await widget.repository.load();
+    var rawCards = await widget.repository.load();
     if (!mounted) return;
 
     final systemLanguageCode =
@@ -213,23 +217,56 @@ class _HomeScreenState extends State<HomeScreen> {
         ? 'en'
         : currentLanguageCode;
 
-    final resolvedCards = rawCards
+    var resolvedCards = rawCards
         .map(
           (card) =>
               widget.repository.resolveForLocale(card, effectiveLanguageCode),
         )
         .toList(growable: false);
 
-    final total = resolvedCards.length;
-    final remainingRatio = total > 0 ? 1.0 : 0.0;
+    var total = resolvedCards.length;
+    var remainingRatio = total > 0 ? 1.0 : 0.0;
     final importReason = total == 0 ? 'empty_db' : loadReason;
-    await widget.repository.runAutoImportIfNeeded(
+
+    // Run auto-import if needed
+    final started = await widget.repository.runAutoImportIfNeeded(
       importReason,
       total,
       remainingRatio,
       effectiveLanguageCode,
       _importer,
     );
+
+    // If import was triggered, reload cards after it finishes.
+    if (started) {
+      // Import finished inside runAutoImportIfNeeded(), but SharedPreferences can still
+      // return the old value immediately after a write on some devices/backends.
+      // So we retry for a short window and keep the loader visible until cards appear.
+      const maxAttempts = 20; // 20 * 250ms = ~5s
+      var attempt = 0;
+      while (attempt < maxAttempts) {
+        rawCards = await widget.repository.load();
+        if (rawCards.isNotEmpty) break;
+        await Future.delayed(const Duration(milliseconds: 250));
+        attempt++;
+      }
+
+      resolvedCards = rawCards
+          .map(
+            (card) =>
+                widget.repository.resolveForLocale(card, effectiveLanguageCode),
+          )
+          .toList(growable: false);
+
+      total = resolvedCards.length;
+    }
+
+    // If we just triggered an import and still got nothing back, keep showing the loader.
+    // (We already waited ~5s above; this is just a defensive fallback.)
+    if (started && resolvedCards.isEmpty) {
+      debugPrint('LOAD_CARDS_EMPTY_AFTER_IMPORT (keeping loader)');
+      return;
+    }
 
     if (!mounted) return;
     setState(() {
@@ -256,7 +293,13 @@ class _HomeScreenState extends State<HomeScreen> {
               .toLowerCase();
       final effectiveLanguageCode =
           currentLanguageCode.isEmpty ? 'en' : currentLanguageCode;
-      await widget.repository.runImportPipeline(_importer, effectiveLanguageCode);
+      final currentTotal = (await widget.repository.load()).length;
+      await widget.repository.runImportPipeline(
+        _importer,
+        effectiveLanguageCode,
+        total: currentTotal,
+        reason: 'manual',
+      );
 
       if (!mounted) return;
       final rawCards = await widget.repository.load();
