@@ -1,5 +1,5 @@
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
+import 'package:flutter/foundation.dart' show debugPrint;
 
 import 'card_model.dart';
 import '../import/trivia_importer.dart';
@@ -21,6 +21,11 @@ class CardRepository {
   static const double kAutoImportThreshold = 0.6;
   static const int kMinPool = 200;
   static const int kCooldownMinutes = 10;
+
+  /// Bootstrap (empty DB): fetch EN cap, translate to DE+ES, persist. No demo cards.
+  static const int kBootstrapEnCount = 50;
+  static const List<String> kBootstrapTargetLangs = <String>['de', 'es'];
+  static const double kBootstrapMaxFailuresRatio = 0.5;
 
   final SharedPreferences _prefs;
   bool _importRunning = false;
@@ -45,15 +50,14 @@ class CardRepository {
     _prefs.setInt(_autoImportConsumedKey, 0);
   }
 
+  /// Always use production Cloudflare worker. Local wrangler dev is for curl only.
   ProxyTranslationClient createTranslationClient() {
-    final baseUrl = kDebugMode
-        ? Uri.parse('http://localhost:8788')
-        : Uri.parse('https://brainflow-translate.bjdybkw57j.workers.dev');
+    const baseUrl = 'https://brainflow-translate.bjdybkw57j.workers.dev';
     if (!_workerBaseLogged) {
-      debugPrint('TRANSLATION_WORKER_BASE=${baseUrl.host}');
+      debugPrint('TRANSLATION_WORKER_BASE=$baseUrl');
       _workerBaseLogged = true;
     }
-    return ProxyTranslationClient(baseUrl: baseUrl);
+    return ProxyTranslationClient(baseUrl: Uri.parse(baseUrl));
   }
 
   Future<List<CardModel>> load() async {
@@ -137,7 +141,12 @@ class CardRepository {
       'AUTO_IMPORT_TRIGGERED reason=$reason total=$total remainingRatio=$remainingRatio cooldownOk=true threshold=$kAutoImportThreshold',
     );
     try {
-      final result = await runImportPipeline(importer, effectiveLang);
+      final result = await runImportPipeline(
+        importer,
+        effectiveLang,
+        total: total,
+        reason: reason,
+      );
       if (result != null) {
         final now = DateTime.now().millisecondsSinceEpoch;
         _prefs.setInt(_autoImportLastAtKey, now);
@@ -249,23 +258,28 @@ class CardRepository {
   /// Target total cards after pipeline (when adding EN supplement).
   static const int kTargetTotal = 1000;
 
-  /// Translates EN cards to de + es via worker. Cards that fail translation are dropped.
-  /// Logs IMPORT_TRANSLATION_OK and IMPORT_TRANSLATION_FAIL. No silent failures.
-  Future<List<CardModel>> translateEnCardsStrict(List<CardModel> enCards) async {
-    if (enCards.isEmpty) return enCards;
+  /// Translates EN cards to de + es via worker. Keeps only cards with BOTH de & es.
+  /// Returns cards + failedCount/attemptedCount for bootstrap fail-ratio check.
+  Future<TranslateEnCardsResult> translateEnCardsStrict(List<CardModel> enCards) async {
+    if (enCards.isEmpty) {
+      return TranslateEnCardsResult(cards: <CardModel>[], failedCount: 0, attemptedCount: 0);
+    }
     final client = createTranslationClient();
     final result = <CardModel>[];
     var translatedDe = 0;
     var translatedEs = 0;
     var failCount = 0;
+    var attemptedCount = 0;
 
     for (final card in enCards) {
       if (card.sourceLanguage != 'en') continue;
       final sourceEntry = card.languageMap['en'];
       if (sourceEntry == null) {
         failCount++;
+        attemptedCount++;
         continue;
       }
+      attemptedCount++;
       final hasDe = card.languageMap.containsKey('de');
       final hasEs = card.languageMap.containsKey('es');
       if (hasDe && hasEs) {
@@ -341,29 +355,73 @@ class CardRepository {
     if (translatedDe > 0) debugPrint('IMPORT_TRANSLATION_OK lang=de count=$translatedDe');
     if (translatedEs > 0) debugPrint('IMPORT_TRANSLATION_OK lang=es count=$translatedEs');
     if (failCount > 0) debugPrint('IMPORT_TRANSLATION_FAIL count=$failCount');
-    return result;
+    return TranslateEnCardsResult(
+      cards: result,
+      failedCount: failCount,
+      attemptedCount: attemptedCount,
+    );
   }
 
-  /// Full import pipeline: EN from opentdb.com + translate (de/es), merge. DE via translate (opentrivia.de disabled).
-  /// Returns result on success, null on failure.
-  Future<ImportPipelineResult?> runImportPipeline(TriviaImporter importer, String effectiveLang) async {
+  /// Full import pipeline: EN from opentdb.com + translate (de/es), merge.
+  /// When total==0 or reason=='empty_db', runs bootstrap (cap kBootstrapEnCount, fail-ratio check).
+  /// Returns result on success, null on failure. Never wipes storage on translation failure.
+  Future<ImportPipelineResult?> runImportPipeline(
+    TriviaImporter importer,
+    String effectiveLang, {
+    int total = 0,
+    String reason = '',
+  }) async {
     final stopwatch = Stopwatch()..start();
+    final isBootstrap = total == 0 || reason == 'empty_db';
+    final enCap = isBootstrap ? kBootstrapEnCount : kEnChunkPerRun;
     var totalNew = 0;
     try {
-      // DE via EN + translate (opentrivia.de disabled)
-      final enCards = await importer.fetchEN(cap: kEnChunkPerRun);
-      final enTranslated = await translateEnCardsStrict(enCards);
-      final mergeEn = await mergeAndPersistRaw(enTranslated);
+      if (isBootstrap) {
+        debugPrint('BOOTSTRAP_START en=$kBootstrapEnCount');
+      }
+      final enCards = await importer.fetchEN(cap: enCap);
+      final transResult = await translateEnCardsStrict(enCards);
+
+      if (isBootstrap) {
+        debugPrint(
+          'BOOTSTRAP_TRANSLATION_OK kept=${transResult.cards.length} failed=${transResult.failedCount}',
+        );
+        if (transResult.attemptedCount > 0 &&
+            transResult.failedCount / transResult.attemptedCount > kBootstrapMaxFailuresRatio) {
+          debugPrint(
+            'BOOTSTRAP_FAIL reason=too_many_failures ratio=${transResult.failedCount}/${transResult.attemptedCount}',
+          );
+          return null;
+        }
+        if (transResult.cards.isEmpty) {
+          debugPrint('BOOTSTRAP_FAIL reason=no_cards_after_translation');
+          return null;
+        }
+      }
+
+      final mergeEn = await mergeAndPersistRaw(transResult.cards);
       totalNew += mergeEn.newCount;
       debugPrint('IMPORT_MERGE_DONE new=${mergeEn.newCount} total=${mergeEn.cards.length}');
 
+      if (mergeEn.cards.isEmpty) {
+        if (isBootstrap) debugPrint('BOOTSTRAP_FAIL reason=merge_empty');
+        return null;
+      }
       await _prefs.setBool(_importDoneKey, true);
       final all = await load();
+      if (isBootstrap) {
+        debugPrint('BOOTSTRAP_DONE total=${all.length}');
+      }
       _logImportStats(all);
       stopwatch.stop();
-      return ImportPipelineResult(newCount: totalNew, total: all.length, durationMs: stopwatch.elapsedMilliseconds);
+      return ImportPipelineResult(
+        newCount: totalNew,
+        total: all.length,
+        durationMs: stopwatch.elapsedMilliseconds,
+      );
     } catch (e, st) {
       debugPrint('IMPORT_DONE_FAIL error=$e');
+      if (isBootstrap) debugPrint('BOOTSTRAP_FAIL reason=$e');
       assert(() {
         debugPrint('$st');
         return true;
@@ -542,6 +600,17 @@ class CardRepository {
       debugPrint('DIAGNOSTICS error=$e');
     }
   }
+}
+
+class TranslateEnCardsResult {
+  const TranslateEnCardsResult({
+    required this.cards,
+    required this.failedCount,
+    required this.attemptedCount,
+  });
+  final List<CardModel> cards;
+  final int failedCount;
+  final int attemptedCount;
 }
 
 class MergeResult {
