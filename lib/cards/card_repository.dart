@@ -52,7 +52,7 @@ class CardRepository {
 
   /// Always use production Cloudflare worker. Local wrangler dev is for curl only.
   ProxyTranslationClient createTranslationClient() {
-    const baseUrl = 'https://brainflow-translate.bjdybkw57j.workers.dev';
+    const baseUrl = 'https://brainflow-translation-worker.bjdybkw57j.workers.dev';
     if (!_workerBaseLogged) {
       debugPrint('TRANSLATION_WORKER_BASE=$baseUrl');
       _workerBaseLogged = true;
