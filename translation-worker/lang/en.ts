@@ -32,7 +32,7 @@ export const enPack: LanguagePack = {
     translatedTexts: string[],
     protectedAnswerIndices: number[]
   ): {
-    bad: boolean;
+    level: "good" | "fallback" | "bad";
     reasons: string[];
     allowedUnchangedIndices: number[];
     disallowedUnchangedIndices: number[];
@@ -47,18 +47,26 @@ export const enPack: LanguagePack = {
 
     if (orig.length !== trans.length) {
       reasons.push("length_mismatch");
-      return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    if (orig.length < 3) {
+      reasons.push("fewer_than_two_answers");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
     }
     if (orig.length === 0) {
-      return { bad: false, reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "good", reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
     }
 
-    for (let i = 0; i < trans.length; i++) {
-      const t = (trans[i] ?? "").trim();
-      if (!t || isPunctuationOnly(trans[i] ?? "")) {
-        reasons.push("empty_or_punctuation_only");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
-      }
+    const questionEmpty = !(trans[0] ?? "").trim() || isPunctuationOnly(trans[0] ?? "");
+    if (questionEmpty) {
+      reasons.push("empty_question");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    const answersTrans = trans.slice(answerStartIdx);
+    const allAnswersEmpty = answersTrans.length > 0 && answersTrans.every((t) => !(t ?? "").trim() || isPunctuationOnly(t ?? ""));
+    if (allAnswersEmpty) {
+      reasons.push("all_answers_empty");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
     }
 
     for (let ai = 0; ai < orig.length - answerStartIdx; ai++) {
@@ -67,7 +75,7 @@ export const enPack: LanguagePack = {
       const t = (trans[answerStartIdx + ai] ?? "").trim();
       if (o !== t) {
         reasons.push("protected_answer_changed");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+        return { level: "fallback", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
       }
     }
 
@@ -78,7 +86,7 @@ export const enPack: LanguagePack = {
       if (normalize(o) === normalize(t)) allowedUnchangedIndices.push(ai);
     }
 
-    const bad = reasons.length > 0;
-    return { bad, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    const level = reasons.length > 0 ? "fallback" : "good";
+    return { level, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
   },
 };
