@@ -52,8 +52,11 @@ function shouldProtectAnswerDE(answer: string): boolean {
   // Punctuation typical for names/brands: . & / - '
   if (/[.&\/\-']/.test(t)) return true;
 
-  // Short token(s) length <= 3, uppercase/letters (U2, AC/DC covered by punctuation)
   const tokens = t.split(/\s+/).filter(Boolean);
+  // Multi-word answers (2+ words) — very often names/titles
+  if (tokens.length >= 2) return true;
+
+  // Short token(s) length <= 3, uppercase/letters (U2, AC/DC covered by punctuation)
   if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
 
   // Single-word capitalized brand/band names (e.g. Oasis, Prince, Muse, Lúcio) — 4–12 chars, exclude translatable terms
