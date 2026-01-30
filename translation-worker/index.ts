@@ -6,8 +6,8 @@ export interface Env {
   TRANSLATION_CACHE?: KVNamespace;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.3";
-const CACHE_VERSION = "bf-dev-answers-v7.3";
+const DEBUG_BUILD = "bf-dev-answers-v7.2";
+const CACHE_VERSION = "bf-dev-answers-v7.2";
 
 let debugLoggingEnabled = false;
 
@@ -53,22 +53,42 @@ function badRequest(message: string): Response {
   return json({ error: message } satisfies ErrorResponse, { status: 400 });
 }
 
+function badRequestWithMeta(message: string): Response {
+  return json(
+    { error: message, meta: { issue: "bad_request" } },
+    { status: 400 },
+  );
+}
+
 function serverError(message: string): Response {
   return json({ error: message } satisfies ErrorResponse, { status: 500 });
 }
 
+const SOURCE_ALLOWLIST = new Set([
+  "en", "de", "es", "fr", "it", "nl", "sv", "tr", "da", "fi", "no", "pl", "pt",
+]);
+
 function isValidLang(code: string): boolean {
-  const c = code.trim();
-  return c.length >= 2 && c.length <= 5 && /^[a-zA-Z-]+$/.test(c);
+  const c = code.trim().toLowerCase();
+  return c.length >= 2 && c.length <= 5 && /^[a-z]{2}(-[a-z]{2})?$/.test(c);
 }
 
-function validateRequest(body: unknown): { ok: true; value: Required<TranslateBatchRequest> } | { ok: false; error: string } {
+function validateRequest(
+  body: unknown,
+): { ok: true; value: TranslateBatchRequest & { target: string; texts: string[] } } | { ok: false; error: string } {
   if (typeof body !== "object" || body === null) return { ok: false, error: "Invalid JSON body." };
   const b = body as Record<string, unknown>;
-  const target = typeof b.target === "string" ? b.target : "";
-  if (!isValidLang(target)) return { ok: false, error: "target must be 2-5 characters (e.g. 'es', 'de', 'pt')." };
-  const source = typeof b.source === "string" && b.source.trim() ? b.source : "auto";
-  if (source !== "auto" && !isValidLang(source)) return { ok: false, error: "source must be 'auto' or 2-5 characters." };
+  const targetRaw = typeof b.target === "string" ? b.target : "";
+  const target = targetRaw.trim().toLowerCase();
+  if (!target || !isValidLang(target)) return { ok: false, error: "target must be 2-5 characters (e.g. 'es', 'de', 'pt')." };
+  const sourceRaw = typeof b.source === "string" ? b.source.trim().toLowerCase() : "";
+  let source: string | undefined;
+  if (sourceRaw && sourceRaw !== "auto") {
+    if (!SOURCE_ALLOWLIST.has(sourceRaw)) {
+      return { ok: false, error: "source must be 'auto' or one of: en, de, es, fr, it, nl, sv, tr, da, fi, no, pl, pt." };
+    }
+    source = sourceRaw;
+  }
   if (!Array.isArray(b.texts)) return { ok: false, error: "texts must be an array." };
   const texts = b.texts;
   if (texts.length < 1 || texts.length > 20) return { ok: false, error: "texts must have 1..20 elements." };
@@ -162,15 +182,18 @@ async function translateWithGoogleV2(
 
   const url = new URL("https://translation.googleapis.com/language/translate/v2");
   url.searchParams.set("key", apiKey);
+  const payload: Record<string, unknown> = {
+    q: protectedTexts,
+    target: params.target,
+    format: "text",
+  };
+  if (params.source != null && params.source !== "auto") {
+    payload.source = params.source;
+  }
   const res = await fetch(url.toString(), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      q: protectedTexts,
-      source: params.source,
-      target: params.target,
-      format: "text",
-    }),
+    body: JSON.stringify(payload),
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`Google Translate error ${res.status}: ${text}`);
@@ -217,7 +240,7 @@ export default {
     }
 
     const validated = validateRequest(body);
-    if (!validated.ok) return badRequest(validated.error);
+    if (!validated.ok) return badRequestWithMeta(validated.error);
     const params = validated.value;
 
     if (!env.GOOGLE_API_KEY || env.GOOGLE_API_KEY.trim().length === 0) {
@@ -237,7 +260,7 @@ export default {
     }
 
     const cacheKeyHash = await sha256Hex(params.texts.join("|"));
-    const cacheKey = `${CACHE_VERSION}|${params.target}|${params.source}|${cacheKeyHash}`;
+    const cacheKey = `${CACHE_VERSION}|${params.target}|${params.source ?? "auto"}|${cacheKeyHash}`;
     const bypassCache = request.headers.get("x-bypass-cache") === "1";
     let cacheHit = false;
     let googleCalled = false;
@@ -345,28 +368,44 @@ export default {
         logDebug("[v7.3] unchanged-only-protected → allowed");
       }
 
-      const mayStore = !bypassCache && googleCalled && env.TRANSLATION_CACHE;
-      if (mayStore) {
-        const meta: TranslateBatchResponse["meta"] = {
-          build: DEBUG_BUILD,
-          cacheHit: false,
-          googleCalled: true,
-          protectionApplied,
-          postProcessed,
-          postProcessRulesApplied,
-          issue: null,
-          cacheStored: true,
-          cacheStoreReason: "ok",
-          allowedUnchangedIndices: badResult.allowedUnchangedIndices,
-          disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
-        };
-        await env.TRANSLATION_CACHE!.put(
+      let didStore = false;
+      const shouldStore =
+        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE;
+      if (shouldStore && env.TRANSLATION_CACHE) {
+        await env.TRANSLATION_CACHE.put(
           cacheKey,
-          JSON.stringify({ build: CACHE_VERSION, translated, meta }),
+          JSON.stringify({
+            build: CACHE_VERSION,
+            translated,
+            meta: {
+              build: DEBUG_BUILD,
+              cacheHit: false,
+              googleCalled: true,
+              protectionApplied,
+              postProcessed,
+              postProcessRulesApplied,
+              issue: null,
+              cacheStored: true,
+              cacheStoreReason: "ok",
+              allowedUnchangedIndices: badResult.allowedUnchangedIndices,
+              disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
+            },
+          }),
           { expirationTtl: 60 * 60 * 24 * 30 },
         );
+        didStore = true;
         logDebug(`cache stored: key=${cacheKey}`);
       }
+
+      if (typeof didStore !== "boolean") {
+        logDebug("cacheStored not boolean, forcing false");
+        didStore = false;
+      }
+      const cacheStoreReason: TranslateBatchResponse["meta"]["cacheStoreReason"] = bypassCache
+        ? "bypass"
+        : didStore
+          ? "ok"
+          : "skipped_bad_result";
 
       const resp: TranslateBatchResponse = {
         translated,
@@ -378,8 +417,8 @@ export default {
           postProcessed,
           postProcessRulesApplied,
           issue: null,
-          cacheStored: mayStore,
-          cacheStoreReason: bypassCache ? "bypass" : mayStore ? "ok" : "skipped_bad_result",
+          cacheStored: didStore,
+          cacheStoreReason,
           allowedUnchangedIndices: badResult.allowedUnchangedIndices,
           disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
         },
