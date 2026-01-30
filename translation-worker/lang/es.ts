@@ -24,6 +24,20 @@ function isPunctuationOnly(s: string): boolean {
   return /^[\s\p{P}\p{S}]*$/u.test((s ?? "").trim());
 }
 
+/** Exclude from "should-have-translated" mixed check: numeric, short, proper-noun-like. */
+function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
+  const t = (answer ?? "").trim();
+  if (!t) return true;
+  if (t.length <= 3) return true;
+  if (/^\d+$/.test(t) || /^(19|20)\d{2}$/.test(t)) return true;
+  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
+  if (/\d/.test(t)) return true;
+  if (/^[IVXLCDM]+$/i.test(t)) return true;
+  if (/[.:\-]\w|\w[.:\-]/.test(t)) return true;
+  return false;
+}
+
 function shouldProtectAnswerES(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
@@ -80,7 +94,7 @@ export const esPack: LanguagePack = {
     translatedTexts: string[],
     protectedAnswerIndices: number[]
   ): {
-    bad: boolean;
+    level: "good" | "fallback" | "bad";
     reasons: string[];
     allowedUnchangedIndices: number[];
     disallowedUnchangedIndices: number[];
@@ -95,19 +109,29 @@ export const esPack: LanguagePack = {
 
     if (orig.length !== trans.length) {
       reasons.push("length_mismatch");
-      return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    if (orig.length < 3) {
+      reasons.push("fewer_than_two_answers");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
     }
     if (orig.length === 0) {
-      return { bad: false, reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "good", reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
     }
 
-    for (let i = 0; i < trans.length; i++) {
-      const t = (trans[i] ?? "").trim();
-      if (!t || isPunctuationOnly(trans[i] ?? "")) {
-        reasons.push("empty_or_punctuation_only");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
-      }
+    const questionEmpty = !(trans[0] ?? "").trim() || isPunctuationOnly(trans[0] ?? "");
+    if (questionEmpty) {
+      reasons.push("empty_question");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
     }
+    const answersTrans = trans.slice(answerStartIdx);
+    const allAnswersEmpty = answersTrans.length > 0 && answersTrans.every((t) => !(t ?? "").trim() || isPunctuationOnly(t ?? ""));
+    if (allAnswersEmpty) {
+      reasons.push("all_answers_empty");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    const someAnswerEmpty = answersTrans.some((t) => !(t ?? "").trim() || isPunctuationOnly(t ?? ""));
+    if (someAnswerEmpty) reasons.push("partial_translations");
 
     for (let ai = 0; ai < orig.length - answerStartIdx; ai++) {
       if (!protectedSet.has(ai)) continue;
@@ -115,7 +139,7 @@ export const esPack: LanguagePack = {
       const t = (trans[answerStartIdx + ai] ?? "").trim();
       if (o !== t) {
         reasons.push("protected_answer_changed");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+        break;
       }
     }
 
@@ -127,6 +151,8 @@ export const esPack: LanguagePack = {
         if (protectedSet.has(ai)) {
           allowedUnchangedIndices.push(ai);
         } else if (allowUnchangedAnswerES(o, t)) {
+          allowedUnchangedIndices.push(ai);
+        } else if (isLikelyProperNounOrNumericOrShort(o)) {
           allowedUnchangedIndices.push(ai);
         } else {
           disallowedUnchangedIndices.push(ai);
@@ -150,7 +176,9 @@ export const esPack: LanguagePack = {
       }
     }
 
-    const bad = reasons.length > 0;
-    return { bad, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    const badReasons = new Set(["length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty"]);
+    const hasBad = reasons.some((r) => badReasons.has(r));
+    const level = hasBad ? "bad" : reasons.length > 0 ? "fallback" : "good";
+    return { level, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
   },
 };

@@ -26,15 +26,18 @@ export interface LanguagePack {
   allowUnchangedAnswer(original: string, translated: string): boolean;
 
   /**
-   * Validate translation. Return bad=true if mixed answers, protected changed, structural issues.
-   * reasons[] for debug; allowedUnchangedIndices / disallowedUnchangedIndices are 0-based answer indices.
+   * Validate translation. Returns level: good | fallback | bad.
+   * BAD: empty question, &lt;2 answers, all answers empty, broken structure.
+   * FALLBACK: mixed answers, partial translations, &gt;30% unchanged without protection,
+   * protected answer modified, grammar corruption.
+   * GOOD: otherwise.
    */
   isBadTranslation(
     originalTexts: string[],
     translatedTexts: string[],
     protectedAnswerIndices: number[]
   ): {
-    bad: boolean;
+    level: "good" | "fallback" | "bad";
     reasons: string[];
     allowedUnchangedIndices: number[];
     disallowedUnchangedIndices: number[];

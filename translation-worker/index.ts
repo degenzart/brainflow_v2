@@ -6,8 +6,52 @@ export interface Env {
   TRANSLATION_CACHE?: KVNamespace;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.3";
-const CACHE_VERSION = "bf-dev-answers-v7.3";
+const DEBUG_BUILD = "bf-dev-answers-v7.2.1";
+const CACHE_VERSION = "bf-dev-answers-v7.2.1";
+
+/** NON-NEGOTIABLE: any output containing placeholders forces fallback_original. */
+const PLACEHOLDER_PATTERN = /PROTECT_|__PROTECT|PROT_\d/;
+function containsPlaceholder(texts: string[]): boolean {
+  return texts.some((t) => PLACEHOLDER_PATTERN.test(t ?? ""));
+}
+
+/** HTML entity pattern in output: &name; or &#NNN; or &#xHH; — indicates bad output. */
+const HTML_ENTITY_IN_OUTPUT = /&(?:#\d+|#x[\da-fA-F]+|\w+);/;
+
+/** Decode common OpenTDB HTML entities. Safe: numeric first, then named. */
+function htmlDecode(text: string): string {
+  if (typeof text !== "string" || !text.length) return text;
+  let s = text;
+  // Numeric: &#123; and &#x1F;
+  s = s.replace(/&#(\d+);/g, (_, n) => {
+    const code = parseInt(n, 10);
+    return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : `&#${n};`;
+  });
+  s = s.replace(/&#x([\da-fA-F]+);/g, (_, hex) => {
+    const code = parseInt(hex, 16);
+    return code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : `&#x${hex};`;
+  });
+  // Named (common OpenTDB + Latin)
+  const named: Record<string, string> = {
+    "&quot;": '"', "&apos;": "'", "&#39;": "'", "&amp;": "&", "&lt;": "<", "&gt;": ">",
+    "&uuml;": "ü", "&Uuml;": "Ü", "&auml;": "ä", "&Auml;": "Ä", "&ouml;": "ö", "&Ouml;": "Ö",
+    "&uacute;": "ú", "&eacute;": "é", "&iacute;": "í", "&oacute;": "ó", "&ntilde;": "ñ",
+    "&nbsp;": " ", "&ldquo;": '"', "&rdquo;": '"', "&lsquo;": "'", "&rsquo;": "'",
+  };
+  for (const [ent, ch] of Object.entries(named)) s = s.split(ent).join(ch);
+  return s;
+}
+
+/** True if any input contained entities we decoded. */
+function wasHtmlDecoded(original: string[], decoded: string[]): boolean {
+  if (original.length !== decoded.length) return false;
+  return original.some((o, i) => o !== decoded[i]);
+}
+
+/** True if any string contains &...; pattern. */
+function hasHtmlEntitiesInOutput(texts: string[]): boolean {
+  return texts.some((t) => HTML_ENTITY_IN_OUTPUT.test(t ?? ""));
+}
 
 let debugLoggingEnabled = false;
 
@@ -23,10 +67,13 @@ type TranslateBatchRequest = {
   texts: string[];
 };
 
+type Outcome = "ok_translated" | "fallback_original";
+
 type TranslateBatchResponse = {
   translated: string[];
   meta: {
     build: string;
+    outcome: Outcome;
     cacheHit: boolean;
     googleCalled: boolean;
     protectionApplied: boolean;
@@ -38,6 +85,16 @@ type TranslateBatchResponse = {
     allowedUnchangedIndices?: number[];
     disallowedUnchangedIndices?: number[];
     badResultReasons?: string[];
+    fallbackReason?: string;
+    containsPlaceholder?: boolean;
+    mixedLanguageDetected?: boolean;
+    unchangedAnalysis?: { allowed: number; disallowed: number; ratio: number };
+    retryAttempted?: boolean;
+    retrySucceeded?: boolean;
+    htmlDecoded?: boolean;
+    htmlEntitiesDetectedInOutput?: boolean;
+    validationLevel?: "good" | "fallback" | "bad";
+    fallbackUsed?: boolean;
   };
 };
 
@@ -62,6 +119,65 @@ function badRequestWithMeta(message: string): Response {
 
 function serverError(message: string): Response {
   return json({ error: message } satisfies ErrorResponse, { status: 500 });
+}
+
+function buildMetaBase(
+  overrides: Partial<TranslateBatchResponse["meta"]> & { outcome: Outcome; issue: string | null; cacheStored: boolean; cacheStoreReason: TranslateBatchResponse["meta"]["cacheStoreReason"] }
+): TranslateBatchResponse["meta"] {
+  return {
+    build: DEBUG_BUILD,
+    outcome: overrides.outcome,
+    cacheHit: overrides.cacheHit ?? false,
+    googleCalled: overrides.googleCalled ?? false,
+    protectionApplied: overrides.protectionApplied ?? false,
+    postProcessed: overrides.postProcessed ?? false,
+    postProcessRulesApplied: overrides.postProcessRulesApplied ?? [],
+    issue: overrides.issue,
+    cacheStored: overrides.cacheStored,
+    cacheStoreReason: overrides.cacheStoreReason,
+    ...overrides,
+  };
+}
+
+function buildFallbackResponse(
+  decodedTexts: string[],
+  opts: {
+    fallbackReason: string;
+    containsPlaceholder: boolean;
+    mixedLanguageDetected?: boolean;
+    badResultReasons?: string[];
+    unchangedAnalysis?: { allowed: number; disallowed: number; ratio: number };
+    htmlDecoded?: boolean;
+    retryAttempted?: boolean;
+    retrySucceeded?: boolean;
+  }
+): Response {
+  const meta = buildMetaBase({
+    outcome: "fallback_original",
+    issue: "fallback_original",
+    cacheStored: false,
+    cacheStoreReason: "skipped_bad_result",
+    fallbackReason: opts.fallbackReason,
+    containsPlaceholder: opts.containsPlaceholder,
+    mixedLanguageDetected: opts.mixedLanguageDetected ?? false,
+    badResultReasons: opts.badResultReasons,
+    unchangedAnalysis: opts.unchangedAnalysis,
+    htmlDecoded: opts.htmlDecoded,
+    retryAttempted: opts.retryAttempted ?? false,
+    retrySucceeded: opts.retrySucceeded ?? false,
+    htmlEntitiesDetectedInOutput: false,
+  });
+  return json(
+    { translated: decodedTexts, meta } satisfies TranslateBatchResponse,
+    { status: 200 }
+  );
+}
+
+/** v7.2 fallback: keep translated question, restore original answers — no mixed content. */
+function sanitize(decodedTexts: string[], translated: string[]): string[] {
+  const question = (translated[0] ?? "").trim() ? (translated[0] ?? "").trim() : (decodedTexts[0] ?? "").trim();
+  const answers = decodedTexts.slice(1);
+  return [question, ...answers];
 }
 
 const SOURCE_ALLOWLIST = new Set([
@@ -91,7 +207,7 @@ function validateRequest(
   }
   if (!Array.isArray(b.texts)) return { ok: false, error: "texts must be an array." };
   const texts = b.texts;
-  if (texts.length < 1 || texts.length > 20) return { ok: false, error: "texts must have 1..20 elements." };
+  if (texts.length < 3 || texts.length > 20) return { ok: false, error: "texts must have at least 3 elements (question + 2 answers)." };
   const out: string[] = [];
   for (let i = 0; i < texts.length; i++) {
     const t = texts[i];
@@ -250,8 +366,11 @@ export default {
     const targetLang = params.target.trim().toLowerCase();
     const sourceLang = (params.source || "auto").trim().toLowerCase();
     const pack = getLanguagePack(params.target);
-    const question = params.texts[0] ?? "";
-    const answers = params.texts.slice(1);
+    const decodedTexts = params.texts.map(htmlDecode);
+    const htmlDecoded = wasHtmlDecoded(params.texts, decodedTexts);
+    if (debugLoggingEnabled && htmlDecoded) logDebug("html entities found in input, decoded");
+    const question = decodedTexts[0] ?? "";
+    const answers = decodedTexts.slice(1);
     const protectedAnswerIndices = pack.getProtectedAnswerIndices(answers);
     const protectedFullTextIndices = protectedAnswerIndices.map((ai) => ai + 1);
 
@@ -259,7 +378,7 @@ export default {
       logDebug(`protected indices (0-based answers): ${JSON.stringify(protectedAnswerIndices)}`);
     }
 
-    const cacheKeyHash = await sha256Hex(params.texts.join("|"));
+    const cacheKeyHash = await sha256Hex(decodedTexts.join("|"));
     const cacheKey = `${CACHE_VERSION}|${params.target}|${params.source ?? "auto"}|${cacheKeyHash}`;
     const bypassCache = request.headers.get("x-bypass-cache") === "1";
     let cacheHit = false;
@@ -279,34 +398,33 @@ export default {
             typeof parsed === "object" &&
             parsed.build === CACHE_VERSION &&
             Array.isArray(parsed.translated) &&
-            parsed.translated.length === params.texts.length &&
-            parsed.translated.every((x) => typeof x === "string")
+            parsed.translated.length === decodedTexts.length &&
+            parsed.translated.every((x) => typeof x === "string") &&
+            parsed.meta &&
+            typeof parsed.meta === "object"
           ) {
             cacheHit = true;
-            logDebug(`CACHE_HIT: key=${cacheKey}`);
-            let translated = parsed.translated as string[];
-            let postProcessed = false;
-            let postProcessRulesApplied: string[] = [];
-            if (translated.length >= 1) {
-              const post = pack.postProcessQuestion(translated[0] ?? "", question);
-              translated = [post.text, ...translated.slice(1)];
-              postProcessed = post.text !== (parsed.translated as string[])[0];
-              postProcessRulesApplied = post.rulesApplied;
+            const storedMeta = parsed.meta as TranslateBatchResponse["meta"];
+            const rulesCount = Array.isArray(storedMeta.postProcessRulesApplied) ? storedMeta.postProcessRulesApplied.length : 0;
+            logDebug(`CACHE_HIT key=${cacheKey} postProcessed=${!!storedMeta.postProcessed} rulesCount=${rulesCount}`);
+            const translated = parsed.translated as string[];
+            if (containsPlaceholder(translated)) {
+              if (debugLoggingEnabled) logDebug("cache hit: placeholder in output → fallback_original");
+              return buildFallbackResponse(decodedTexts, {
+                fallbackReason: "placeholder_leak",
+                containsPlaceholder: true,
+                htmlDecoded,
+              });
             }
             const resp: TranslateBatchResponse = {
               translated,
               meta: {
+                ...storedMeta,
                 build: DEBUG_BUILD,
                 cacheHit: true,
                 googleCalled: false,
-                protectionApplied: parsed.meta?.protectionApplied ?? false,
-                postProcessed,
-                postProcessRulesApplied,
-                issue: null,
                 cacheStored: false,
                 cacheStoreReason: "cache_hit",
-                allowedUnchangedIndices: parsed.meta?.allowedUnchangedIndices,
-                disallowedUnchangedIndices: parsed.meta?.disallowedUnchangedIndices,
               },
             };
             return json(resp, { status: 200 });
@@ -320,81 +438,140 @@ export default {
       }
     }
 
-    try {
-      googleCalled = true;
-      const { translated: rawTranslated, protectionApplied } = await translateWithGoogleV2(
-        params,
-        env.GOOGLE_API_KEY,
-        protectedFullTextIndices,
-      );
+    let retryAttempted = false;
+    let retrySucceeded = false;
+    let htmlEntitiesDetectedInOutput = false;
 
+    async function runTranslate(protectedIndices: number[]): Promise<{
+      translated: string[];
+      protectionApplied: boolean;
+      postProcessed: boolean;
+      postProcessRulesApplied: string[];
+    }> {
+      const { translated: rawTranslated, protectionApplied } = await translateWithGoogleV2(
+        { ...params, texts: decodedTexts },
+        env.GOOGLE_API_KEY,
+        protectedIndices,
+      );
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", question);
       translated[0] = postResult.text;
       const postProcessed = (rawTranslated[0] ?? "") !== postResult.text;
       const postProcessRulesApplied = postResult.rulesApplied;
+      return { translated, protectionApplied, postProcessed, postProcessRulesApplied };
+    }
 
-      const badResult = pack.isBadTranslation(params.texts, translated, protectedAnswerIndices);
+    try {
+      googleCalled = true;
+      let run = await runTranslate(protectedFullTextIndices);
+      let translated = run.translated;
+      let protectionApplied = run.protectionApplied;
+      let postProcessed = run.postProcessed;
+      let postProcessRulesApplied = run.postProcessRulesApplied;
 
-      if (badResult.bad) {
-        logDebug(`bad_result reasons: ${JSON.stringify(badResult.reasons)}`);
-        logDebug(`disallowed unchanged indices: ${JSON.stringify(badResult.disallowedUnchangedIndices)}`);
-        logDebug(`cache skipped (bad_result)`);
-
-        const resp: TranslateBatchResponse = {
-          translated,
-          meta: {
-            build: DEBUG_BUILD,
-            cacheHit,
-            googleCalled,
-            protectionApplied,
-            postProcessed,
-            postProcessRulesApplied,
-            issue: "bad_result",
-            cacheStored: false,
-            cacheStoreReason: bypassCache ? "bypass" : "skipped_bad_result",
-            allowedUnchangedIndices: badResult.allowedUnchangedIndices,
-            disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
-            badResultReasons: badResult.reasons,
-          },
+      let validationResult = pack.isBadTranslation(decodedTexts, translated, protectedAnswerIndices);
+      if (hasHtmlEntitiesInOutput(translated)) {
+        htmlEntitiesDetectedInOutput = true;
+        if (debugLoggingEnabled) logDebug("html entities detected in output");
+        validationResult = {
+          ...validationResult,
+          level: validationResult.level === "bad" ? "bad" : "fallback",
+          reasons: [...validationResult.reasons, "html_entities_in_output"],
         };
-        return json(resp, { status: 200 });
+      }
+      if (containsPlaceholder(translated)) {
+        if (debugLoggingEnabled) logDebug("placeholder in output → BAD");
+        validationResult = {
+          ...validationResult,
+          level: "bad",
+          reasons: [...validationResult.reasons, "placeholder_in_output"],
+        };
       }
 
-      if (
-        badResult.allowedUnchangedIndices.length > 0 &&
-        badResult.disallowedUnchangedIndices.length === 0
-      ) {
-        logDebug("[v7.3] unchanged-only-protected → allowed");
+      const numAnswers = Math.max(1, decodedTexts.length - 1);
+      const allowed = validationResult.allowedUnchangedIndices.length;
+      const disallowed = validationResult.disallowedUnchangedIndices.length;
+      const unchangedAnalysis = numAnswers > 0 ? { allowed, disallowed, ratio: (allowed + disallowed) / numAnswers } : undefined;
+
+      if (validationResult.level === "bad") {
+        logDebug(`validation BAD: ${JSON.stringify(validationResult.reasons)}`);
+        logDebug("cache skipped (BAD)");
+        return json(
+          {
+            translated: decodedTexts,
+            meta: buildMetaBase({
+              outcome: "fallback_original",
+              issue: "bad_result",
+              cacheStored: false,
+              cacheStoreReason: "skipped_bad_result",
+              cacheHit,
+              googleCalled,
+              protectionApplied,
+              postProcessed,
+              postProcessRulesApplied,
+              validationLevel: "bad",
+              fallbackUsed: false,
+              badResultReasons: validationResult.reasons,
+              fallbackReason: validationResult.reasons[0],
+              unchangedAnalysis,
+              htmlDecoded,
+              containsPlaceholder: containsPlaceholder(translated),
+              mixedLanguageDetected: validationResult.reasons.includes("mixed_language_in_question"),
+            }),
+          } satisfies TranslateBatchResponse,
+          { status: 200 }
+        );
+      }
+
+      let outputTranslated: string[];
+      let fallbackUsed = false;
+
+      if (validationResult.level === "fallback") {
+        if (debugLoggingEnabled) logDebug("fallback triggered");
+        outputTranslated = sanitize(decodedTexts, translated);
+        if (containsPlaceholder(outputTranslated)) {
+          outputTranslated = decodedTexts;
+        }
+        fallbackUsed = true;
+        if (debugLoggingEnabled) logDebug("sanitize applied");
+        if (debugLoggingEnabled) logDebug("diversity restored");
+      } else {
+        outputTranslated = translated;
       }
 
       let didStore = false;
       const shouldStore =
-        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE;
+        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE && validationResult.level !== "bad";
       if (shouldStore && env.TRANSLATION_CACHE) {
+        const storedMeta: TranslateBatchResponse["meta"] = {
+          build: DEBUG_BUILD,
+          outcome: "ok_translated",
+          cacheHit: false,
+          googleCalled: true,
+          protectionApplied,
+          postProcessed,
+          postProcessRulesApplied,
+          issue: null,
+          cacheStored: true,
+          cacheStoreReason: "ok",
+          allowedUnchangedIndices: validationResult.allowedUnchangedIndices,
+          disallowedUnchangedIndices: validationResult.disallowedUnchangedIndices,
+          htmlDecoded,
+          validationLevel: validationResult.level,
+          fallbackUsed,
+        };
+        const cachePayload = {
+          build: CACHE_VERSION,
+          translated: outputTranslated,
+          meta: storedMeta,
+        };
         await env.TRANSLATION_CACHE.put(
           cacheKey,
-          JSON.stringify({
-            build: CACHE_VERSION,
-            translated,
-            meta: {
-              build: DEBUG_BUILD,
-              cacheHit: false,
-              googleCalled: true,
-              protectionApplied,
-              postProcessed,
-              postProcessRulesApplied,
-              issue: null,
-              cacheStored: true,
-              cacheStoreReason: "ok",
-              allowedUnchangedIndices: badResult.allowedUnchangedIndices,
-              disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
-            },
-          }),
+          JSON.stringify(cachePayload),
           { expirationTtl: 60 * 60 * 24 * 30 },
         );
         didStore = true;
-        logDebug(`cache stored: key=${cacheKey}`);
+        logDebug(`cache stored key=${cacheKey} postProcessed=${storedMeta.postProcessed} issue=${storedMeta.issue ?? "null"}`);
       }
 
       if (typeof didStore !== "boolean") {
@@ -408,20 +585,29 @@ export default {
           : "skipped_bad_result";
 
       const resp: TranslateBatchResponse = {
-        translated,
-        meta: {
-          build: DEBUG_BUILD,
+        translated: outputTranslated,
+        meta: buildMetaBase({
+          outcome: "ok_translated",
+          issue: null,
+          cacheStored: didStore,
+          cacheStoreReason,
           cacheHit,
           googleCalled,
           protectionApplied,
           postProcessed,
           postProcessRulesApplied,
-          issue: null,
-          cacheStored: didStore,
-          cacheStoreReason,
-          allowedUnchangedIndices: badResult.allowedUnchangedIndices,
-          disallowedUnchangedIndices: badResult.disallowedUnchangedIndices,
-        },
+          allowedUnchangedIndices: validationResult.allowedUnchangedIndices,
+          disallowedUnchangedIndices: validationResult.disallowedUnchangedIndices,
+          unchangedAnalysis,
+          retryAttempted,
+          retrySucceeded,
+          htmlDecoded,
+          htmlEntitiesDetectedInOutput,
+          containsPlaceholder: false,
+          mixedLanguageDetected: false,
+          validationLevel: validationResult.level,
+          fallbackUsed,
+        }),
       };
       return json(resp, { status: 200 });
     } catch (e: any) {

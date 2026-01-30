@@ -35,6 +35,58 @@ function isPunctuationOnly(s: string): boolean {
   return /^[\s\p{P}\p{S}]*$/u.test((s ?? "").trim());
 }
 
+/** English function-word fragments that must not appear in a translated DE question. */
+const EN_FRAGMENT_PATTERNS = [
+  /\bis\s+the\b/i, /\bwith\s+/i, /\bwhich\b/i, /\bin\s+the\b/i,
+  /\bno\s+breaks\b/i, /\bline-up\b/i, /\bthe\s+album\b/i,
+  /\brecorded\b/i, /\breleased\b/i, /\bwhat\b/i, /\bwho\b/i, /\bwhere\b/i, /\bwhen\b/i, /\bhow\b/i,
+];
+function detectEnglishFragments(text: string): boolean {
+  const t = (text ?? "").trim();
+  return EN_FRAGMENT_PATTERNS.some((re) => re.test(t));
+}
+
+/** German-only signals: stopwords or umlauts. */
+const DE_SIGNAL = /\b(Welche?|Welcher|der|die|das|und|ist|sind|hat|haben|für|von|mit|auf|nach)\b|ä|ö|ü|ß/i;
+/** Extract runs of 5+ ASCII letter-words from text. */
+function getLongAsciiWordRuns(text: string): string[] {
+  const lower = (text ?? "").toLowerCase();
+  const runs: string[] = [];
+  const wordRun = /[a-z]{2,}(?:\s+[a-z]{2,}){4,}/g;
+  let m: RegExpExecArray | null;
+  while ((m = wordRun.exec(lower)) !== null) {
+    runs.push(m[0]);
+  }
+  return runs;
+}
+
+/** High-signal: translated question has both German AND long English fragment from original. */
+function detectMixedLanguageInQuestion(translatedQ: string, originalQ: string): boolean {
+  const t = (translatedQ ?? "").trim();
+  const o = (originalQ ?? "").trim();
+  if (!t || !o) return false;
+  if (!DE_SIGNAL.test(t)) return false;
+  const originalRuns = getLongAsciiWordRuns(o);
+  for (const run of originalRuns) {
+    if (t.toLowerCase().includes(run)) return true;
+  }
+  return false;
+}
+
+/** Exclude from "should-have-translated" mixed check: numeric, short, proper-noun-like. */
+function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
+  const t = (answer ?? "").trim();
+  if (!t) return true;
+  if (t.length <= 3) return true;
+  if (/^\d+$/.test(t) || /^(19|20)\d{2}$/.test(t)) return true;
+  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
+  if (/\d/.test(t)) return true;
+  if (/^[IVXLCDM]+$/i.test(t)) return true;
+  if (/[.:\-]\w|\w[.:\-]/.test(t)) return true;
+  return false;
+}
+
 /** Strong signals only. NOT uppercase-start alone (German nouns!). */
 function shouldProtectAnswerDE(answer: string): boolean {
   const t = (answer ?? "").trim();
@@ -171,7 +223,7 @@ export const dePack: LanguagePack = {
     translatedTexts: string[],
     protectedAnswerIndices: number[]
   ): {
-    bad: boolean;
+    level: "good" | "fallback" | "bad";
     reasons: string[];
     allowedUnchangedIndices: number[];
     disallowedUnchangedIndices: number[];
@@ -182,25 +234,36 @@ export const dePack: LanguagePack = {
     const orig = originalTexts ?? [];
     const trans = translatedTexts ?? [];
     const protectedSet = new Set(protectedAnswerIndices ?? []);
+    const answerStartIdx = 1;
 
     if (orig.length !== trans.length) {
       reasons.push("length_mismatch");
-      return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    if (orig.length < 3) {
+      reasons.push("fewer_than_two_answers");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
     }
     if (orig.length === 0) {
-      return { bad: false, reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
+      return { level: "good", reasons: [], allowedUnchangedIndices, disallowedUnchangedIndices };
     }
 
-    for (let i = 0; i < trans.length; i++) {
-      const t = (trans[i] ?? "").trim();
-      if (!t || isPunctuationOnly(trans[i] ?? "")) {
-        reasons.push("empty_or_punctuation_only");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
-      }
+    const questionEmpty = !(trans[0] ?? "").trim() || isPunctuationOnly(trans[0] ?? "");
+    if (questionEmpty) {
+      reasons.push("empty_question");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    const answersTrans = trans.slice(answerStartIdx);
+    const allAnswersEmpty = answersTrans.length > 0 && answersTrans.every((t) => !(t ?? "").trim() || isPunctuationOnly(t ?? ""));
+    if (allAnswersEmpty) {
+      reasons.push("all_answers_empty");
+      return { level: "bad", reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    }
+    const someAnswerEmpty = answersTrans.some((t) => !(t ?? "").trim() || isPunctuationOnly(t ?? ""));
+    if (someAnswerEmpty) {
+      reasons.push("partial_translations");
     }
 
-    const questionIdx = 0;
-    const answerStartIdx = 1;
     for (let ai = 0; ai < orig.length - answerStartIdx; ai++) {
       const i = answerStartIdx + ai;
       if (!protectedSet.has(ai)) continue;
@@ -208,7 +271,7 @@ export const dePack: LanguagePack = {
       const t = (trans[i] ?? "").trim();
       if (o !== t) {
         reasons.push("protected_answer_changed");
-        return { bad: true, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+        break;
       }
     }
 
@@ -221,10 +284,19 @@ export const dePack: LanguagePack = {
           allowedUnchangedIndices.push(ai);
         } else if (allowUnchangedAnswerDE(o, t)) {
           allowedUnchangedIndices.push(ai);
+        } else if (isLikelyProperNounOrNumericOrShort(o)) {
+          allowedUnchangedIndices.push(ai);
         } else {
           disallowedUnchangedIndices.push(ai);
         }
       }
+    }
+
+    if (detectEnglishFragments(trans[0] ?? "")) {
+      reasons.push("question_contains_english_fragments");
+    }
+    if (detectMixedLanguageInQuestion(trans[0] ?? "", orig[0] ?? "")) {
+      reasons.push("mixed_language_in_question");
     }
 
     const numNonProtectedAnswers = orig.length - answerStartIdx;
@@ -246,12 +318,13 @@ export const dePack: LanguagePack = {
     if (EN_RESIDUAL_PATTERN.test(trans[0] ?? "") || EN_THE_ALBUM_PATTERN.test(trans[0] ?? "")) {
       reasons.push("partial_sentence_source_fragments");
     }
-
     if (/Welches Band/i.test(trans[0] ?? "")) {
       reasons.push("de_welches_band");
     }
 
-    const bad = reasons.length > 0;
-    return { bad, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
+    const badReasons = new Set(["length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty"]);
+    const hasBad = reasons.some((r) => badReasons.has(r));
+    const level = hasBad ? "bad" : reasons.length > 0 ? "fallback" : "good";
+    return { level, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
   },
 };

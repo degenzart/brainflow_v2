@@ -1,12 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bash-only smoke tests for translation-worker.
+# Bash-only smoke tests for translation-worker (v7.4 ALL-OR-NOTHING).
 # Default: local dev worker. Override with:
 #   WORKER_URL="https://<your-worker>.workers.dev/translateBatch" ./tools/worker_smoke_tests.sh
 WORKER_URL="${WORKER_URL:-http://127.0.0.1:8788/translateBatch}"
 
 fail=0
+
+# v7.4: Never allow placeholder leak. Check response body for any placeholder token.
+assert_no_placeholder () {
+  local resp="$1"
+  if echo "$resp" | grep -qE 'PROTECT_|__PROTECT|PROT_[0-9]'; then
+    echo "RESULT: FAIL (placeholder leak in response)"
+    return 1
+  fi
+  return 0
+}
+
+# v7.4: meta must include outcome (ok_translated | fallback_original).
+assert_meta_outcome () {
+  local resp="$1"
+  if echo "$resp" | grep -qE '"outcome":[[:space:]]*"(ok_translated|fallback_original)"'; then
+    return 0
+  fi
+  echo "RESULT: FAIL (meta.outcome missing or invalid)"
+  return 1
+}
 
 run_test () {
   local name="$1"
@@ -27,9 +47,17 @@ run_test () {
   echo "$resp"
   echo "------------------------------------------------------------"
 
+  if ! assert_no_placeholder "$resp"; then fail=1; echo; return; fi
+  if ! assert_meta_outcome "$resp"; then fail=1; echo; return; fi
+
   if ! echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
-    echo "RESULT: FAIL (issue not null)"
-    fail=1
+    # issue non-null => expect fallback_original and translated = original (HTML-decoded)
+    if echo "$resp" | grep -q '"outcome":[[:space:]]*"fallback_original"'; then
+      echo "RESULT: PASS (fallback_original as expected)"
+    else
+      echo "RESULT: FAIL (issue set but outcome not fallback_original)"
+      fail=1
+    fi
   elif [ "$no_interrogative" = "no_english_interrogative" ]; then
     if echo "$resp" | grep -qEi '\b(Which|What|Who|Where|When|How)\b'; then
       echo "RESULT: FAIL (translated question contains English interrogative)"
@@ -96,6 +124,81 @@ run_test "Hocus Pocus 1973 (clean)" \
     "Pilot",
     "ELO",
     "Yes"
+  ]
+}'
+
+# --- v7.4 regression: 6 cases ---
+
+# 1) HTML entity answer (Lúcio) - input may have &#250; or similar; output must be clean, no placeholder
+run_test "v7.4 regression 1: HTML entity answer (Lúcio)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "Which Overwatch hero is from Brazil?",
+    "Lúcio",
+    "McCree",
+    "Sombra",
+    "Symmetra"
+  ]
+}' \
+no_english_interrogative
+
+# 2) German question with possible English fragment - expect ok_translated or fallback_original
+run_test "v7.4 regression 2: German question (no mixed-language output)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "Which band recorded the album OK Computer?",
+    "Radiohead",
+    "Muse",
+    "Coldplay",
+    "Oasis"
+  ]
+}'
+
+# 3) Placeholder leak: any response must never contain PROTECT_ or __PROTECT (asserted in run_test)
+
+# 4) Mixed answers scenario - some translated some not; expect fallback or ok
+run_test "v7.4 regression 4: Mixed answers scenario" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "What is the capital of France?",
+    "Paris",
+    "Lyon",
+    "Marseille",
+    "Berlin"
+  ]
+}'
+
+# 5) Pure proper noun answers - expect ok_translated (unchanged allowed)
+run_test "v7.4 regression 5: Pure proper noun answers" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "Which band released Definitely Maybe?",
+    "Oasis",
+    "Beatles",
+    "Mozart",
+    "Google"
+  ]
+}'
+
+# 6) Numeric answers - expect ok_translated
+run_test "v7.4 regression 6: Numeric answers" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "In which year did World War II end?",
+    "1945",
+    "1939",
+    "1941",
+    "1950"
   ]
 }'
 
