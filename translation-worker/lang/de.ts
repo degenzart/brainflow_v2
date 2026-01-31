@@ -26,6 +26,63 @@ const KNOWN_TRANSLATABLE = new Set([
   "netherlands", "belgium", "switzerland", "sweden", "norway", "denmark", "finland", "poland",
   "greece", "portugal", "ireland", "scotland", "wales", "uk", "usa", "united states", "united kingdom",
 ]);
+// v7.3.2: Title-Case answers containing any of these are NOT protected (translate: Pulmonary Artery, Spanish Flu, etc.).
+const DE_GENERIC_WORDS = new Set([
+  "artery", "vein", "vision", "disease", "syndrome", "flu", "war", "treaty", "empire", "kingdom",
+  "republic", "revolution", "battle", "element", "symbol", "acid", "base", "muscle", "bone", "nerve",
+  "pandemic", "virus", "river", "mountain", "capital", "president",
+]);
+
+/** v7.3.1: Case-insensitive. True if any token (incl. not first) is in generic list. */
+function containsGenericWord(answer: string): boolean {
+  const tokens = (answer ?? "").trim().split(/\s+/).filter(Boolean);
+  return tokens.some((w) => DE_GENERIC_WORDS.has(normalize(w)));
+}
+
+// v7.3.1: Common German nouns that indicate proper noun mistranslation (e.g. Eleven -> Elf).
+const COMMON_GERMAN_NOUNS = new Set([
+  "elf", "bär", "könig", "königin", "prinz", "prinzessin", "mann", "frau", "kind", "junge", "mädchen",
+  "stadt", "land", "fluss", "berg", "see", "baum", "tier", "vogel", "fisch", "buch", "film", "spiel",
+]);
+
+function looksLikeProperNoun(answer: string): boolean {
+  const t = (answer ?? "").trim();
+  if (!t || /\d/.test(t)) return false;
+  const tokens = t.split(/\s+/).filter(Boolean);
+  if (tokens.length < 1 || tokens.length > 3) return false;
+  return tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w));
+}
+
+function isCommonGermanNounTranslation(translated: string): boolean {
+  const t = (translated ?? "").trim().toLowerCase();
+  if (!t || t.length > 30) return false;
+  const token = t.split(/\s+/)[0];
+  if (!token) return false;
+  return COMMON_GERMAN_NOUNS.has(normalize(token)) || (token.length <= 5 && /^[a-zäöüß]+$/.test(token));
+}
+
+/** v7.3.1: Returns 0-based answer indices to force-protect on retry (proper noun mistranslated to common DE noun). */
+export function getForceProtectIndicesForProperNounMistranslation(
+  originalTexts: string[],
+  translatedTexts: string[],
+  protectedAnswerIndices: number[]
+): number[] {
+  const orig = originalTexts ?? [];
+  const trans = translatedTexts ?? [];
+  const protectedSet = new Set(protectedAnswerIndices ?? []);
+  const answerStartIdx = 1;
+  const force: number[] = [];
+  for (let ai = 0; ai < orig.length - answerStartIdx; ai++) {
+    if (protectedSet.has(ai)) continue;
+    const o = (orig[answerStartIdx + ai] ?? "").trim();
+    const t = (trans[answerStartIdx + ai] ?? "").trim();
+    if (!o || !t) continue;
+    if (!looksLikeProperNoun(o)) continue;
+    if (normalize(o) === normalize(t)) continue;
+    if (isCommonGermanNounTranslation(t)) force.push(ai);
+  }
+  return force;
+}
 
 function normalize(s: string): string {
   return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -87,37 +144,40 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
-/** Strong signals only. NOT uppercase-start alone (German nouns!). */
+/** v7.3: Protect only true proper nouns/IDs. No "starts with uppercase => protect". */
 function shouldProtectAnswerDE(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
 
-  // ALL CAPS (e.g. NASA)
-  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  // v7.3.1: Generic medical/history/science terms MUST NOT be protected (override any other heuristic).
+  if (containsGenericWord(t)) return false;
 
-  // Contains digits (e.g. 1999, 2Pac, MK2)
+  // a) Contains digits (years, percentages, ordinals)
   if (/\d/.test(t)) return true;
 
-  // Internal capitals (e.g. iPhone, eBay)
-  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
+  // b) ALL CAPS len>=2 or acronyms/initialisms with dots (U.S.A., R.E.M.)
+  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
 
-  // Punctuation typical for names/brands: . & / - '
+  // c) Underscores, __, PROTECT_, or ID/code-like (hex, GUID, SKU)
+  if (/[_]|__|PROTECT_/.test(t)) return true;
+  if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
+
+  // d) camelCase/mixedCase (iPhone, eBay) or identifier punctuation (. / - ')
+  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
   if (/[.&\/\-']/.test(t)) return true;
 
+  // Short token(s) length <= 3, letters (U2, Au, Ag)
   const tokens = t.split(/\s+/).filter(Boolean);
-  // Multi-word answers (2+ words) — very often names/titles
-  if (tokens.length >= 2) return true;
-
-  // Short token(s) length <= 3, uppercase/letters (U2, AC/DC covered by punctuation)
   if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
 
-  // Single-word capitalized brand/band names (e.g. Oasis, Prince, Muse, Lúcio) — 4–12 chars, exclude translatable terms
-  if (tokens.length === 1 && t.length >= 4 && t.length <= 12) {
-    if (/^[A-Z][a-z]+$/.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
-    if (/^[A-Z]\p{L}+$/u.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
+  // e) Name-pattern: 2–4 words Title Case AND does NOT contain generic words
+  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) {
+    const hasGeneric = tokens.some((w) => DE_GENERIC_WORDS.has(normalize(w)));
+    if (!hasGeneric) return true;
   }
 
-  // Known brand/name regex
+  // Known brand/name regex (AC/DC, iPhone, etc.)
   for (const re of KNOWN_BRAND_NAME_PATTERNS) {
     if (re.test(t)) return true;
   }
@@ -315,6 +375,19 @@ export const dePack: LanguagePack = {
       }
     }
 
+    const allUnchangedAnswerIndices = [...new Set([...allowedUnchangedIndices, ...disallowedUnchangedIndices])];
+    const nonProtectedUnchangedCount = allUnchangedAnswerIndices.filter((ai) => !protectedSet.has(ai)).length;
+    const totalAnswerCount = numNonProtectedAnswers;
+    const unchangedNonProtectedRatio = totalAnswerCount > 0 ? nonProtectedUnchangedCount / totalAnswerCount : 0;
+    if (unchangedNonProtectedRatio > 0.3) {
+      reasons.push("too_many_unchanged_non_protected");
+    }
+    const allAnswersUnchanged = totalAnswerCount > 0 && allUnchangedAnswerIndices.length === totalAnswerCount;
+    const atLeastOneNonProtected = allUnchangedAnswerIndices.some((ai) => !protectedSet.has(ai));
+    if (allAnswersUnchanged && atLeastOneNonProtected) {
+      reasons.push("all_answers_unchanged");
+    }
+
     if (EN_RESIDUAL_PATTERN.test(trans[0] ?? "") || EN_THE_ALBUM_PATTERN.test(trans[0] ?? "")) {
       reasons.push("partial_sentence_source_fragments");
     }
@@ -322,7 +395,10 @@ export const dePack: LanguagePack = {
       reasons.push("de_welches_band");
     }
 
-    const badReasons = new Set(["length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty"]);
+    const badReasons = new Set([
+      "length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty",
+      "too_many_unchanged_non_protected", "all_answers_unchanged",
+    ]);
     const hasBad = reasons.some((r) => badReasons.has(r));
     const level = hasBad ? "bad" : reasons.length > 0 ? "fallback" : "good";
     return { level, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };

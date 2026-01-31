@@ -15,6 +15,18 @@ const KNOWN_TRANSLATABLE = new Set([
   "netherlands", "belgium", "switzerland", "sweden", "norway", "denmark", "finland", "poland",
   "greece", "portugal", "ireland", "scotland", "wales", "uk", "usa", "united states", "united kingdom",
 ]);
+// v7.3.2: Title-Case answers containing any of these are NOT protected (mirror DE).
+const ES_GENERIC_WORDS = new Set([
+  "artery", "vein", "vision", "disease", "syndrome", "flu", "war", "treaty", "empire", "kingdom",
+  "republic", "revolution", "battle", "element", "symbol", "acid", "base", "muscle", "bone", "nerve",
+  "pandemic", "virus", "river", "mountain", "capital", "president",
+]);
+
+/** v7.3.1: Case-insensitive. True if any token is in generic list. */
+function containsGenericWordES(answer: string): boolean {
+  const tokens = (answer ?? "").trim().split(/\s+/).filter(Boolean);
+  return tokens.some((w) => ES_GENERIC_WORDS.has(normalize(w)));
+}
 
 function normalize(s: string): string {
   return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
@@ -38,20 +50,23 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
+/** v7.3: Protect only true proper nouns/IDs. No "starts with uppercase => protect". */
 function shouldProtectAnswerES(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
-  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  if (containsGenericWordES(t)) return false;
   if (/\d/.test(t)) return true;
+  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
+  if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
+  if (/[_]|__|PROTECT_/.test(t)) return true;
+  if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
   if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
   if (/[.&\/\-']/.test(t)) return true;
   const tokens = t.split(/\s+/).filter(Boolean);
-  if (tokens.length >= 2) return true;
   if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
-  // Single-word capitalized proper nouns (e.g. Oasis, Beatles, Mozart) — min length 4, exclude translatable terms
-  if (tokens.length === 1 && t.length >= 4 && t.length <= 12) {
-    if (/^[A-Z][a-z]+$/.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
-    if (/^[A-Z]\p{L}+$/u.test(t) && !KNOWN_TRANSLATABLE.has(normalize(t))) return true;
+  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) {
+    const hasGeneric = tokens.some((w) => ES_GENERIC_WORDS.has(normalize(w)));
+    if (!hasGeneric) return true;
   }
   for (const re of KNOWN_BRAND_PATTERNS) {
     if (re.test(t)) return true;
@@ -176,7 +191,23 @@ export const esPack: LanguagePack = {
       }
     }
 
-    const badReasons = new Set(["length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty"]);
+    const allUnchangedAnswerIndices = [...new Set([...allowedUnchangedIndices, ...disallowedUnchangedIndices])];
+    const nonProtectedUnchangedCount = allUnchangedAnswerIndices.filter((ai) => !protectedSet.has(ai)).length;
+    const totalAnswerCount = numNonProtectedAnswers;
+    const unchangedNonProtectedRatio = totalAnswerCount > 0 ? nonProtectedUnchangedCount / totalAnswerCount : 0;
+    if (unchangedNonProtectedRatio > 0.3) {
+      reasons.push("too_many_unchanged_non_protected");
+    }
+    const allAnswersUnchanged = totalAnswerCount > 0 && allUnchangedAnswerIndices.length === totalAnswerCount;
+    const atLeastOneNonProtected = allUnchangedAnswerIndices.some((ai) => !protectedSet.has(ai));
+    if (allAnswersUnchanged && atLeastOneNonProtected) {
+      reasons.push("all_answers_unchanged");
+    }
+
+    const badReasons = new Set([
+      "length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty",
+      "too_many_unchanged_non_protected", "all_answers_unchanged",
+    ]);
     const hasBad = reasons.some((r) => badReasons.has(r));
     const level = hasBad ? "bad" : reasons.length > 0 ? "fallback" : "good";
     return { level, reasons, allowedUnchangedIndices, disallowedUnchangedIndices };
