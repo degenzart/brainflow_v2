@@ -1,4 +1,5 @@
 import { getLanguagePack } from "./lang";
+import { getForceProtectIndicesForProperNounMistranslation } from "./lang/de";
 
 export interface Env {
   GOOGLE_API_KEY: string;
@@ -6,8 +7,13 @@ export interface Env {
   TRANSLATION_CACHE?: KVNamespace;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.2.1";
-const CACHE_VERSION = "bf-dev-answers-v7.2.1";
+const DEBUG_BUILD = "bf-dev-answers-v7.3.2";
+const CACHE_VERSION = "bf-dev-answers-v7.3.2";
+
+/** v7.3.2: meta.protectedIndices are GLOBAL indices (1..n-1). Never include 0 (question). */
+function toGlobalProtectedIndices(answerRelativeIndices: number[]): number[] {
+  return answerRelativeIndices.map((ai) => ai + 1).filter((i) => i >= 1);
+}
 
 /** NON-NEGOTIABLE: any output containing placeholders forces fallback_original. */
 const PLACEHOLDER_PATTERN = /PROTECT_|__PROTECT|PROT_\d/;
@@ -89,12 +95,18 @@ type TranslateBatchResponse = {
     containsPlaceholder?: boolean;
     mixedLanguageDetected?: boolean;
     unchangedAnalysis?: { allowed: number; disallowed: number; ratio: number };
+    protectedIndices?: number[];
+    nonProtectedUnchangedIndices?: number[];
+    unchangedNonProtectedRatio?: number;
     retryAttempted?: boolean;
     retrySucceeded?: boolean;
     htmlDecoded?: boolean;
     htmlEntitiesDetectedInOutput?: boolean;
     validationLevel?: "good" | "fallback" | "bad";
     fallbackUsed?: boolean;
+    retryReason?: string;
+    protectedIndicesInitial?: number[];
+    protectedIndicesFinal?: number[];
   };
 };
 
@@ -371,11 +383,12 @@ export default {
     if (debugLoggingEnabled && htmlDecoded) logDebug("html entities found in input, decoded");
     const question = decodedTexts[0] ?? "";
     const answers = decodedTexts.slice(1);
+    // Protection applies ONLY to answers (indices 1..n-1). Never to question (index 0).
     const protectedAnswerIndices = pack.getProtectedAnswerIndices(answers);
-    const protectedFullTextIndices = protectedAnswerIndices.map((ai) => ai + 1);
+    const protectedFullTextIndices = protectedAnswerIndices.map((ai) => ai + 1).filter((i) => i >= 1);
 
     if (debugLoggingEnabled && protectedAnswerIndices.length > 0) {
-      logDebug(`protected indices (0-based answers): ${JSON.stringify(protectedAnswerIndices)}`);
+      logDebug(`protected indices (global, never 0): ${JSON.stringify(toGlobalProtectedIndices(protectedAnswerIndices))}`);
     }
 
     const cacheKeyHash = await sha256Hex(decodedTexts.join("|"));
@@ -416,6 +429,7 @@ export default {
                 htmlDecoded,
               });
             }
+            const noQuestion = (arr: number[] | undefined) => (arr ?? []).filter((i) => i >= 1);
             const resp: TranslateBatchResponse = {
               translated,
               meta: {
@@ -425,6 +439,9 @@ export default {
                 googleCalled: false,
                 cacheStored: false,
                 cacheStoreReason: "cache_hit",
+                protectedIndices: noQuestion(storedMeta.protectedIndices),
+                protectedIndicesInitial: noQuestion(storedMeta.protectedIndicesInitial),
+                protectedIndicesFinal: noQuestion(storedMeta.protectedIndicesFinal),
               },
             };
             return json(resp, { status: 200 });
@@ -488,13 +505,49 @@ export default {
         };
       }
 
-      const numAnswers = Math.max(1, decodedTexts.length - 1);
-      const allowed = validationResult.allowedUnchangedIndices.length;
-      const disallowed = validationResult.disallowedUnchangedIndices.length;
-      const unchangedAnalysis = numAnswers > 0 ? { allowed, disallowed, ratio: (allowed + disallowed) / numAnswers } : undefined;
+      let finalTranslated = translated;
+      let finalValidationResult = validationResult;
+      let finalProtectedIndices = [...protectedAnswerIndices];
+      let retryReason: string | undefined;
 
-      if (validationResult.level === "bad") {
-        logDebug(`validation BAD: ${JSON.stringify(validationResult.reasons)}`);
+      if (validationResult.level !== "bad" && pack.code === "de") {
+        const forceProtect = getForceProtectIndicesForProperNounMistranslation(decodedTexts, translated, protectedAnswerIndices);
+        if (forceProtect.length > 0 && debugLoggingEnabled) {
+          logDebug(`v7.3.1 retry: proper_noun_translated, forceProtect=${JSON.stringify(forceProtect)}`);
+        }
+        if (forceProtect.length > 0) {
+          retryAttempted = true;
+          retryReason = "proper_noun_translated";
+          const newProtected = [...new Set([...protectedAnswerIndices, ...forceProtect])];
+          const retryFullIndices = newProtected.map((ai) => ai + 1).filter((i) => i >= 1);
+          const retryRun = await runTranslate(retryFullIndices);
+          const translatedRetry = retryRun.translated;
+          if (!containsPlaceholder(translatedRetry)) {
+            const validationResultRetry = pack.isBadTranslation(decodedTexts, translatedRetry, newProtected);
+            if (validationResultRetry.level !== "bad") {
+              finalTranslated = translatedRetry;
+              finalValidationResult = validationResultRetry;
+              finalProtectedIndices = newProtected;
+              protectionApplied = retryRun.protectionApplied;
+              postProcessed = retryRun.postProcessed;
+              postProcessRulesApplied = retryRun.postProcessRulesApplied;
+              if (debugLoggingEnabled) logDebug("v7.3.1 retry succeeded");
+            }
+          }
+        }
+      }
+
+      const numAnswers = Math.max(1, decodedTexts.length - 1);
+      const allowed = finalValidationResult.allowedUnchangedIndices.length;
+      const disallowed = finalValidationResult.disallowedUnchangedIndices.length;
+      const unchangedAnalysis = numAnswers > 0 ? { allowed, disallowed, ratio: (allowed + disallowed) / numAnswers } : undefined;
+      const protectedSet = new Set(finalProtectedIndices);
+      const allUnchangedIndices = [...new Set([...finalValidationResult.allowedUnchangedIndices, ...finalValidationResult.disallowedUnchangedIndices])];
+      const nonProtectedUnchangedIndices = allUnchangedIndices.filter((i) => !protectedSet.has(i));
+      const unchangedNonProtectedRatio = numAnswers > 0 ? nonProtectedUnchangedIndices.length / numAnswers : 0;
+
+      if (finalValidationResult.level === "bad") {
+        logDebug(`validation BAD: ${JSON.stringify(finalValidationResult.reasons)}`);
         logDebug("cache skipped (BAD)");
         return json(
           {
@@ -511,12 +564,19 @@ export default {
               postProcessRulesApplied,
               validationLevel: "bad",
               fallbackUsed: false,
-              badResultReasons: validationResult.reasons,
-              fallbackReason: validationResult.reasons[0],
+              badResultReasons: finalValidationResult.reasons,
+              fallbackReason: finalValidationResult.reasons[0],
               unchangedAnalysis,
+              protectedIndices: toGlobalProtectedIndices(finalProtectedIndices),
+              nonProtectedUnchangedIndices: nonProtectedUnchangedIndices.map((ai) => ai + 1),
+              unchangedNonProtectedRatio,
               htmlDecoded,
-              containsPlaceholder: containsPlaceholder(translated),
-              mixedLanguageDetected: validationResult.reasons.includes("mixed_language_in_question"),
+              containsPlaceholder: containsPlaceholder(finalTranslated),
+              mixedLanguageDetected: finalValidationResult.reasons.includes("mixed_language_in_question"),
+              retryAttempted,
+              retryReason,
+              protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
+              protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
             }),
           } satisfies TranslateBatchResponse,
           { status: 200 }
@@ -526,9 +586,9 @@ export default {
       let outputTranslated: string[];
       let fallbackUsed = false;
 
-      if (validationResult.level === "fallback") {
+      if (finalValidationResult.level === "fallback") {
         if (debugLoggingEnabled) logDebug("fallback triggered");
-        outputTranslated = sanitize(decodedTexts, translated);
+        outputTranslated = sanitize(decodedTexts, finalTranslated);
         if (containsPlaceholder(outputTranslated)) {
           outputTranslated = decodedTexts;
         }
@@ -536,12 +596,12 @@ export default {
         if (debugLoggingEnabled) logDebug("sanitize applied");
         if (debugLoggingEnabled) logDebug("diversity restored");
       } else {
-        outputTranslated = translated;
+        outputTranslated = finalTranslated;
       }
 
       let didStore = false;
       const shouldStore =
-        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE && validationResult.level !== "bad";
+        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE && finalValidationResult.level !== "bad";
       if (shouldStore && env.TRANSLATION_CACHE) {
         const storedMeta: TranslateBatchResponse["meta"] = {
           build: DEBUG_BUILD,
@@ -554,11 +614,19 @@ export default {
           issue: null,
           cacheStored: true,
           cacheStoreReason: "ok",
-          allowedUnchangedIndices: validationResult.allowedUnchangedIndices,
-          disallowedUnchangedIndices: validationResult.disallowedUnchangedIndices,
+          allowedUnchangedIndices: finalValidationResult.allowedUnchangedIndices,
+          disallowedUnchangedIndices: finalValidationResult.disallowedUnchangedIndices,
+          unchangedAnalysis,
+          protectedIndices: toGlobalProtectedIndices(finalProtectedIndices),
+          nonProtectedUnchangedIndices: nonProtectedUnchangedIndices.map((ai) => ai + 1),
+          unchangedNonProtectedRatio,
           htmlDecoded,
-          validationLevel: validationResult.level,
+          validationLevel: finalValidationResult.level,
           fallbackUsed,
+          retryAttempted,
+          retryReason,
+          protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
+          protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
         };
         const cachePayload = {
           build: CACHE_VERSION,
@@ -596,17 +664,23 @@ export default {
           protectionApplied,
           postProcessed,
           postProcessRulesApplied,
-          allowedUnchangedIndices: validationResult.allowedUnchangedIndices,
-          disallowedUnchangedIndices: validationResult.disallowedUnchangedIndices,
+          allowedUnchangedIndices: finalValidationResult.allowedUnchangedIndices,
+          disallowedUnchangedIndices: finalValidationResult.disallowedUnchangedIndices,
           unchangedAnalysis,
+          protectedIndices: toGlobalProtectedIndices(finalProtectedIndices),
+          nonProtectedUnchangedIndices: nonProtectedUnchangedIndices.map((ai) => ai + 1),
+          unchangedNonProtectedRatio,
           retryAttempted,
-          retrySucceeded,
+          retrySucceeded: retryAttempted && finalProtectedIndices.length > protectedAnswerIndices.length,
           htmlDecoded,
           htmlEntitiesDetectedInOutput,
           containsPlaceholder: false,
           mixedLanguageDetected: false,
-          validationLevel: validationResult.level,
+          validationLevel: finalValidationResult.level,
           fallbackUsed,
+          retryReason,
+          protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
+          protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
         }),
       };
       return json(resp, { status: 200 });

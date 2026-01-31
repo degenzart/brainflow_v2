@@ -202,6 +202,64 @@ run_test "v7.4 regression 6: Numeric answers" \
   ]
 }'
 
+# --- v7.3: relaxed protection — generic Title Case translates ---
+
+# Pulmonary Artery / Pulmonary Vein => NOT protected, should translate to DE
+run_test "v7.3: Pulmonary Artery/Vein (generic words → translate)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "Which vessel carries deoxygenated blood?",
+    "Pulmonary Artery",
+    "Pulmonary Vein",
+    "Aorta",
+    "Vena Cava"
+  ]
+}'
+
+# Spanish Flu => NOT protected, expect "Spanische Grippe" or similar in output
+run_test "v7.3: Spanish Flu (generic → translate)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "What pandemic was known as the Spanish Flu?",
+    "1918 Flu",
+    "Spanish Flu",
+    "Asian Flu",
+    "Hong Kong Flu"
+  ]
+}'
+
+# Stranger Things / Eleven / Max Mayfield => proper nouns, protected, unchanged
+run_test "v7.3: Stranger Things proper nouns (protected)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "Which show features Eleven and Max Mayfield?",
+    "Stranger Things",
+    "Eleven",
+    "Max Mayfield",
+    "Hawkins"
+  ]
+}'
+
+# Chem symbols Au/Ag/Fe/Pb => short tokens, protected
+run_test "v7.3: Chem symbols Au/Ag/Fe/Pb (protected)" \
+'{
+  "target": "de",
+  "source": "en",
+  "texts": [
+    "What is the chemical symbol for gold?",
+    "Au",
+    "Ag",
+    "Fe",
+    "Pb"
+  ]
+}'
+
 echo "============================================================"
 if [ "$fail" -eq 0 ]; then
   echo "ALL TESTS PASSED ✅"
