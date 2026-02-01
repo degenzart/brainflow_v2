@@ -28,6 +28,16 @@ assert_meta_outcome () {
   return 1
 }
 
+# v7.4: Assert meta.issue is null (proper-noun/term answers must not trigger bad_result).
+assert_issue_null () {
+  local resp="$1"
+  if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+    return 0
+  fi
+  echo "RESULT: FAIL (expected issue=null for OK Computer / vessel-style quiz)"
+  return 1
+}
+
 run_test () {
   local name="$1"
   local payload="$2"
@@ -50,6 +60,11 @@ run_test () {
   if ! assert_no_placeholder "$resp"; then fail=1; echo; return; fi
   if ! assert_meta_outcome "$resp"; then fail=1; echo; return; fi
 
+  # v7.4: For tests that require issue=null, assert explicitly (OK Computer, vessel).
+  if [ "$name" = "OK Computer / Oasis (must be clean)" ] || [ "$name" = "v7.3: Pulmonary Artery/Vein (generic words → translate)" ]; then
+    if ! assert_issue_null "$resp"; then fail=1; echo; return; fi
+  fi
+
   if ! echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
     # issue non-null => expect fallback_original and translated = original (HTML-decoded)
     if echo "$resp" | grep -q '"outcome":[[:space:]]*"fallback_original"'; then
@@ -71,7 +86,7 @@ run_test () {
   echo
 }
 
-# 1) OK Computer / Oasis - protect band names, no mixed answers, no mutations
+# v7.4: OK Computer / Oasis — proper-noun answers must yield issue=null (no false bad_result).
 run_test "OK Computer / Oasis (must be clean)" \
 '{
   "target": "de",
