@@ -32,6 +32,8 @@ const DE_GENERIC_WORDS = new Set([
   "republic", "revolution", "battle", "element", "symbol", "acid", "base", "muscle", "bone", "nerve",
   "pandemic", "virus", "river", "mountain", "capital", "president",
 ]);
+// v7.4: Do NOT protect common German articles/pronouns when they appear alone.
+const DE_ALONE_ARTICLE = new Set(["der", "die", "das", "ein", "eine"]);
 
 /** v7.3.1: Case-insensitive. True if any token (incl. not first) is in generic list. */
 function containsGenericWord(answer: string): boolean {
@@ -92,6 +94,14 @@ function isPunctuationOnly(s: string): boolean {
   return /^[\s\p{P}\p{S}]*$/u.test((s ?? "").trim());
 }
 
+/** v7.4: True if the question was clearly translated (different from original, not just punctuation). */
+function questionMeaningfullyChanged(origQ: string, transQ: string): boolean {
+  const o = (origQ ?? "").trim();
+  const t = (transQ ?? "").trim();
+  if (!t || isPunctuationOnly(t)) return false;
+  return normalize(o) !== normalize(t);
+}
+
 /** English function-word fragments that must not appear in a translated DE question. */
 const EN_FRAGMENT_PATTERNS = [
   /\bis\s+the\b/i, /\bwith\s+/i, /\bwhich\b/i, /\bin\s+the\b/i,
@@ -144,18 +154,22 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
-/** v7.3: Protect only true proper nouns/IDs. No "starts with uppercase => protect". */
+/** v7.4: Protect proper nouns/terms. No "starts with uppercase => protect". Do NOT protect German articles alone. */
 function shouldProtectAnswerDE(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
 
+  // v7.4: Do NOT protect common German articles/pronouns when they appear alone.
+  if (t.split(/\s+/).filter(Boolean).length === 1 && DE_ALONE_ARTICLE.has(normalize(t))) return false;
+
   // v7.3.1: Generic medical/history/science terms MUST NOT be protected (override any other heuristic).
   if (containsGenericWord(t)) return false;
 
-  // a) Contains digits (years, percentages, ordinals)
+  // a) Contains digits OR roman numerals
   if (/\d/.test(t)) return true;
+  if (/^[IVXLCDM]+$/i.test(t) && t.length >= 1) return true;
 
-  // b) ALL CAPS len>=2 or acronyms/initialisms with dots (U.S.A., R.E.M.)
+  // b) ALL CAPS (>=2 letters)
   if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
   if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
 
@@ -163,21 +177,24 @@ function shouldProtectAnswerDE(answer: string): boolean {
   if (/[_]|__|PROTECT_/.test(t)) return true;
   if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
 
-  // d) camelCase/mixedCase (iPhone, eBay) or identifier punctuation (. / - ')
-  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
-  if (/[.&\/\-']/.test(t)) return true;
-
-  // Short token(s) length <= 3, letters (U2, Au, Ag)
+  // d) Single token: CamelCase (internal capital) OR length>=4 with leading capital (Radiohead, Oasis, Eleven)
   const tokens = t.split(/\s+/).filter(Boolean);
-  if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
-
-  // e) Name-pattern: 2–4 words Title Case AND does NOT contain generic words
-  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) {
-    const hasGeneric = tokens.some((w) => DE_GENERIC_WORDS.has(normalize(w)));
-    if (!hasGeneric) return true;
+  if (tokens.length === 1) {
+    const w = tokens[0]!;
+    if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(w)) return true;
+    if (w.length >= 4 && /^[A-Z]\p{L}*$/u.test(w)) return true;
+    // Chemical symbol: 1–3 letters, first capital (Au, Ag, Fe)
+    if (/^[A-Z][a-zA-Z]{0,2}$/.test(w)) return true;
   }
 
-  // Known brand/name regex (AC/DC, iPhone, etc.)
+  // e) Contains apostrophe, hyphen, colon, or parentheses (names/titles)
+  if (/['\-:()]/.test(t)) return true;
+  if (/[.&\/']/.test(t)) return true;
+
+  // f) Title Case multiword (e.g. Pulmonary Artery, Max Mayfield) — already excluded generic above
+  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) return true;
+
+  // Known brand/name regex (AC/DC, iPhone, OK Computer, etc.)
   for (const re of KNOWN_BRAND_NAME_PATTERNS) {
     if (re.test(t)) return true;
   }
@@ -379,12 +396,14 @@ export const dePack: LanguagePack = {
     const nonProtectedUnchangedCount = allUnchangedAnswerIndices.filter((ai) => !protectedSet.has(ai)).length;
     const totalAnswerCount = numNonProtectedAnswers;
     const unchangedNonProtectedRatio = totalAnswerCount > 0 ? nonProtectedUnchangedCount / totalAnswerCount : 0;
-    if (unchangedNonProtectedRatio > 0.3) {
+    // v7.4: Only reject for too_many_unchanged_non_protected when question did NOT change meaningfully.
+    const questionChanged = questionMeaningfullyChanged(orig[0] ?? "", trans[0] ?? "");
+    if (!questionChanged && unchangedNonProtectedRatio > 0.3) {
       reasons.push("too_many_unchanged_non_protected");
     }
     const allAnswersUnchanged = totalAnswerCount > 0 && allUnchangedAnswerIndices.length === totalAnswerCount;
     const atLeastOneNonProtected = allUnchangedAnswerIndices.some((ai) => !protectedSet.has(ai));
-    if (allAnswersUnchanged && atLeastOneNonProtected) {
+    if (!questionChanged && allAnswersUnchanged && atLeastOneNonProtected) {
       reasons.push("all_answers_unchanged");
     }
 

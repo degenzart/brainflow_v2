@@ -7,8 +7,8 @@ export interface Env {
   TRANSLATION_CACHE?: KVNamespace;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.3.2";
-const CACHE_VERSION = "bf-dev-answers-v7.3.2";
+const DEBUG_BUILD = "bf-dev-answers-v7.4";
+const CACHE_VERSION = "bf-dev-answers-v7.4";
 
 /** v7.3.2: meta.protectedIndices are GLOBAL indices (1..n-1). Never include 0 (question). */
 function toGlobalProtectedIndices(answerRelativeIndices: number[]): number[] {

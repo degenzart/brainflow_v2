@@ -36,6 +36,14 @@ function isPunctuationOnly(s: string): boolean {
   return /^[\s\p{P}\p{S}]*$/u.test((s ?? "").trim());
 }
 
+/** v7.4: True if the question was clearly translated (different from original, not just punctuation). */
+function questionMeaningfullyChanged(origQ: string, transQ: string): boolean {
+  const o = (origQ ?? "").trim();
+  const t = (transQ ?? "").trim();
+  if (!t || isPunctuationOnly(t)) return false;
+  return normalize(o) !== normalize(t);
+}
+
 /** Exclude from "should-have-translated" mixed check: numeric, short, proper-noun-like. */
 function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   const t = (answer ?? "").trim();
@@ -50,24 +58,27 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
-/** v7.3: Protect only true proper nouns/IDs. No "starts with uppercase => protect". */
+/** v7.4: Protect proper nouns/terms. No "starts with uppercase => protect". */
 function shouldProtectAnswerES(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
   if (containsGenericWordES(t)) return false;
   if (/\d/.test(t)) return true;
+  if (/^[IVXLCDM]+$/i.test(t) && t.length >= 1) return true;
   if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
   if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
   if (/[_]|__|PROTECT_/.test(t)) return true;
   if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
-  if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(t)) return true;
-  if (/[.&\/\-']/.test(t)) return true;
   const tokens = t.split(/\s+/).filter(Boolean);
-  if (tokens.length === 1 && /^[A-Za-z]{1,3}$/.test(tokens[0]!)) return true;
-  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) {
-    const hasGeneric = tokens.some((w) => ES_GENERIC_WORDS.has(normalize(w)));
-    if (!hasGeneric) return true;
+  if (tokens.length === 1) {
+    const w = tokens[0]!;
+    if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(w)) return true;
+    if (w.length >= 4 && /^[A-Z]\p{L}*$/u.test(w)) return true;
+    if (/^[A-Z][a-zA-Z]{0,2}$/.test(w)) return true;
   }
+  if (/['\-:()]/.test(t)) return true;
+  if (/[.&\/']/.test(t)) return true;
+  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) return true;
   for (const re of KNOWN_BRAND_PATTERNS) {
     if (re.test(t)) return true;
   }
@@ -195,12 +206,13 @@ export const esPack: LanguagePack = {
     const nonProtectedUnchangedCount = allUnchangedAnswerIndices.filter((ai) => !protectedSet.has(ai)).length;
     const totalAnswerCount = numNonProtectedAnswers;
     const unchangedNonProtectedRatio = totalAnswerCount > 0 ? nonProtectedUnchangedCount / totalAnswerCount : 0;
-    if (unchangedNonProtectedRatio > 0.3) {
+    const questionChanged = questionMeaningfullyChanged(orig[0] ?? "", trans[0] ?? "");
+    if (!questionChanged && unchangedNonProtectedRatio > 0.3) {
       reasons.push("too_many_unchanged_non_protected");
     }
     const allAnswersUnchanged = totalAnswerCount > 0 && allUnchangedAnswerIndices.length === totalAnswerCount;
     const atLeastOneNonProtected = allUnchangedAnswerIndices.some((ai) => !protectedSet.has(ai));
-    if (allAnswersUnchanged && atLeastOneNonProtected) {
+    if (!questionChanged && allAnswersUnchanged && atLeastOneNonProtected) {
       reasons.push("all_answers_unchanged");
     }
 
