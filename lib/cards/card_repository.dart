@@ -27,6 +27,34 @@ class CardRepository {
   static const List<String> kBootstrapTargetLangs = <String>['de', 'es'];
   static const double kBootstrapMaxFailuresRatio = 0.5;
 
+  /// Trim, lower-case, collapse multiple spaces.
+  static String _norm(String s) =>
+      s.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
+
+  /// True if the string is (or contains) the generic placeholder question.
+  static bool _isGenericPlaceholderQuestion(String s) =>
+      _norm(s).contains('worum geht es in dieser frage');
+
+  /// Heuristic: true if text looks like English (common words). False for numbers-only or URLs/abbrevs.
+  static bool _looksEnglish(String s) {
+    final t = _norm(s);
+    if (t.isEmpty) return false;
+    if (t.contains('http') || t.contains('https') || t.contains('ftp') || t.contains('irc')) return false;
+    if (RegExp(r'^[\d\s.,\-]+$').hasMatch(t)) return false;
+    if ((t.contains('"') || t.contains("'")) && (RegExp(r'\bthe\b').hasMatch(t) || RegExp(r'\bwas\b').hasMatch(t))) {
+      return true;
+    }
+    const words = [
+      'one', 'the', 'of', 'in', 'who', 'when', 'what', 'was', 'released',
+      'principal', 'billionth', 'quadrillionth', 'quintillionth', 'septillionth',
+      'book', 'written', 'by',
+    ];
+    for (final w in words) {
+      if (RegExp('\\b${RegExp.escape(w)}\\b').hasMatch(t)) return true;
+    }
+    return false;
+  }
+
   final SharedPreferences _prefs;
   bool _importRunning = false;
 
@@ -52,7 +80,7 @@ class CardRepository {
 
   /// Always use production Cloudflare worker. Local wrangler dev is for curl only.
   ProxyTranslationClient createTranslationClient() {
-    const baseUrl = 'http://127.0.0.1:8788';
+    const baseUrl = String.fromEnvironment('TRANSLATION_BASE_URL', defaultValue: 'https://brainflow-translation-worker.bjdybkw57j.workers.dev');
     if (!_workerBaseLogged) {
       debugPrint('TRANSLATION_WORKER_BASE=$baseUrl');
       _workerBaseLogged = true;
@@ -75,19 +103,41 @@ class CardRepository {
   /// No-op: seed/demo cards disabled; only importer fills DB.
   Future<void> ensureSeed() async {}
 
+  /// Returns a card with question/answers from the source (original) language. Use for "show original" toggle.
+  CardModel getOriginalCard(CardModel raw) {
+    final baseEntry = raw.languageMap[raw.sourceLanguage];
+    if (baseEntry == null) return raw;
+    final correctAnswer = baseEntry.correctIndex >= 0 && baseEntry.correctIndex < baseEntry.answers.length
+        ? baseEntry.answers[baseEntry.correctIndex]
+        : raw.correctAnswer;
+    return CardModel(
+      id: raw.id,
+      question: baseEntry.question,
+      answers: baseEntry.answers,
+      correctAnswer: correctAnswer,
+      sourceLanguage: raw.sourceLanguage,
+      languageMap: raw.languageMap,
+      category: raw.category,
+      difficulty: raw.difficulty,
+      createdAt: raw.createdAt,
+      source: raw.source,
+    );
+  }
+
   /// Resolves a card for a specific locale.
   /// Translations are applied atomically: only if question AND all answers are present and complete.
-  /// Otherwise the original card is returned unchanged to avoid mixed-language UI.
-  CardModel resolveForLocale(CardModel raw, String localeCode) {
+  /// For non-EN locales (wantsStrict), only fully translated cards with no EN remnants are shown; otherwise returns null (skip card).
+  CardModel? resolveForLocale(CardModel raw, String localeCode) {
     // Normalize locale code (e.g., 'en_US' -> 'en')
     final targetLang = localeCode.split('_').first.toLowerCase().trim();
+    final wantsStrict = targetLang != 'en';
 
     final baseEntry = raw.languageMap[raw.sourceLanguage];
     final targetEntry = (targetLang.isNotEmpty) ? raw.languageMap[targetLang] : null;
-    // No translation or no base entry – fall back to original card.
+    // No translation or no base entry – fall back to original card (or null if strict and no base).
     if (baseEntry == null || targetEntry == null || targetLang == raw.sourceLanguage) {
       final resolved = baseEntry ?? targetEntry;
-      if (resolved == null) return raw;
+      if (resolved == null) return wantsStrict ? null : raw;
       final idx = resolved.correctIndex;
       final correctAnswer =
           (idx >= 0 && idx < resolved.answers.length) ? resolved.answers[idx] : raw.correctAnswer;
@@ -114,11 +164,59 @@ class CardRepository {
         translatedAnswers.length == baseAnswers.length &&
         translatedAnswers.every((a) => a.trim().isNotEmpty);
 
-    if (!hasQuestion || !hasAnswers) {
+    final sameQuestion = _norm(translatedQuestion) == _norm(baseEntry.question);
+    var unchangedAnswersCount = 0;
+    for (var i = 0; i < baseAnswers.length && i < translatedAnswers.length; i++) {
+      if (_norm(translatedAnswers[i]) == _norm(baseAnswers[i])) unchangedAnswersCount++;
+    }
+    final allAnswersUnchanged = unchangedAnswersCount == baseAnswers.length;
+    final placeholderQ = _isGenericPlaceholderQuestion(translatedQuestion);
+
+    final useTarget = hasQuestion &&
+        hasAnswers &&
+        !placeholderQ &&
+        !(sameQuestion && allAnswersUnchanged);
+
+    // For DE/ES etc.: only show card if translation is clean (no EN remnants). Otherwise skip.
+    final questionLooksEnglish = _looksEnglish(translatedQuestion);
+    final anyAnswerLooksEnglish = translatedAnswers.any((a) => _looksEnglish(a));
+    final useTargetStrict = useTarget && !questionLooksEnglish && !anyAnswerLooksEnglish;
+
+    if (wantsStrict && !useTargetStrict) {
       debugPrint(
-        'RESOLVE_LOCALE_INCOMPLETE id=${raw.id} lang=$targetLang q=$hasQuestion a=$hasAnswers',
+        'RESOLVE_LOCALE_SKIP id=${raw.id} lang=$targetLang placeholderQ=$placeholderQ qEnglish=$questionLooksEnglish answerEnglish=$anyAnswerLooksEnglish',
       );
-      return raw;
+      return null;
+    }
+
+    if (!useTarget) {
+      if (!hasQuestion || !hasAnswers) {
+        debugPrint(
+          'RESOLVE_LOCALE_INCOMPLETE id=${raw.id} lang=$targetLang q=$hasQuestion a=$hasAnswers',
+        );
+      } else {
+        debugPrint(
+          'RESOLVE_LOCALE_REJECT id=${raw.id} lang=$targetLang placeholderQ=$placeholderQ sameQ=$sameQuestion allUnchanged=$allAnswersUnchanged',
+        );
+      }
+      if (wantsStrict) return null;
+      // Fall back to base entry entirely to avoid mixed-language cards (EN locale only).
+      final idx = baseEntry.correctIndex;
+      final correctAnswer = (idx >= 0 && idx < baseEntry.answers.length)
+          ? baseEntry.answers[idx]
+          : raw.correctAnswer;
+      return CardModel(
+        id: raw.id,
+        question: baseEntry.question,
+        answers: baseEntry.answers,
+        correctAnswer: correctAnswer,
+        sourceLanguage: raw.sourceLanguage,
+        languageMap: raw.languageMap,
+        category: raw.category,
+        difficulty: raw.difficulty,
+        createdAt: raw.createdAt,
+        source: raw.source,
+      );
     }
 
     final idx = targetEntry.correctIndex;
@@ -329,21 +427,26 @@ class CardRepository {
           );
           final badLength = translated.length != texts.length;
           final unchangedQuestion = translated.isNotEmpty &&
-              translated[0].trim().toLowerCase() == sourceEntry.question.trim().toLowerCase();
-          var allAnswersUnchanged = false;
+              _norm(translated[0]) == _norm(sourceEntry.question);
+          var unchangedAnswersCount = 0;
           if (!badLength && translated.length == texts.length && translated.length > 1) {
-            allAnswersUnchanged = true;
-            for (var i = 0; i < sourceEntry.answers.length; i++) {
-              final orig = sourceEntry.answers[i].trim().toLowerCase();
-              final tr = translated[i + 1].trim().toLowerCase();
-              if (orig != tr) {
-                allAnswersUnchanged = false;
-                break;
-              }
+            for (var i = 0; i < sourceEntry.answers.length && i + 1 < translated.length; i++) {
+              if (_norm(translated[i + 1]) == _norm(sourceEntry.answers[i])) unchangedAnswersCount++;
             }
           }
-          if (badLength || (unchangedQuestion && allAnswersUnchanged)) {
+          final allAnswersUnchanged = unchangedAnswersCount == sourceEntry.answers.length;
+          final placeholderQ = translated.isNotEmpty && _isGenericPlaceholderQuestion(translated[0]);
+
+          final badTranslation = badLength ||
+              placeholderQ ||
+              (unchangedQuestion && allAnswersUnchanged);
+          if (badTranslation) {
             fallbackDe++;
+            if (placeholderQ) {
+              debugPrint('IMPORT_TRANSLATION_FALLBACK card=${card.id} lang=de reason=placeholder_question');
+            } else if (unchangedQuestion && allAnswersUnchanged) {
+              debugPrint('IMPORT_TRANSLATION_FALLBACK card=${card.id} lang=de reason=unchanged_answers');
+            }
           } else {
             final entry = CardText(
               question: translated[0],
@@ -382,21 +485,26 @@ class CardRepository {
           );
           final badLength = translated.length != textsEs.length;
           final unchangedQuestion = translated.isNotEmpty &&
-              translated[0].trim().toLowerCase() == sourceForEs.question.trim().toLowerCase();
-          var allAnswersUnchanged = false;
+              _norm(translated[0]) == _norm(sourceForEs.question);
+          var unchangedAnswersCountEs = 0;
           if (!badLength && translated.length == textsEs.length && translated.length > 1) {
-            allAnswersUnchanged = true;
-            for (var i = 0; i < sourceForEs.answers.length; i++) {
-              final orig = sourceForEs.answers[i].trim().toLowerCase();
-              final tr = translated[i + 1].trim().toLowerCase();
-              if (orig != tr) {
-                allAnswersUnchanged = false;
-                break;
-              }
+            for (var i = 0; i < sourceForEs.answers.length && i + 1 < translated.length; i++) {
+              if (_norm(translated[i + 1]) == _norm(sourceForEs.answers[i])) unchangedAnswersCountEs++;
             }
           }
-          if (badLength || (unchangedQuestion && allAnswersUnchanged)) {
+          final allAnswersUnchangedEs = unchangedAnswersCountEs == sourceForEs.answers.length;
+          final placeholderQEs = translated.isNotEmpty && _isGenericPlaceholderQuestion(translated[0]);
+
+          final badTranslationEs = badLength ||
+              placeholderQEs ||
+              (unchangedQuestion && allAnswersUnchangedEs);
+          if (badTranslationEs) {
             fallbackEs++;
+            if (placeholderQEs) {
+              debugPrint('IMPORT_TRANSLATION_FALLBACK card=${card.id} lang=es reason=placeholder_question');
+            } else if (unchangedQuestion && allAnswersUnchangedEs) {
+              debugPrint('IMPORT_TRANSLATION_FALLBACK card=${card.id} lang=es reason=unchanged_answers');
+            }
           } else {
             final entry = CardText(
               question: translated[0],

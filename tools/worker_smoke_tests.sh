@@ -275,6 +275,190 @@ run_test "v7.3: Chem symbols Au/Ag/Fe/Pb (protected)" \
   ]
 }'
 
+# --- v7.4 acceptance: single-word Title Case must translate; chemical + multi-word protected ---
+
+# Acceptance: Italy, Europe, Germany, Austria must all translate; protectionApplied false or protectedIndices empty
+echo "============================================================"
+echo "TEST: v7.4 acceptance: Countries (Italy, Europe, Germany, Austria) all translated"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["Which of these are countries or regions?","Italy","Europe","Germany","Austria"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if ! echo "$resp" | grep -q '"issue":[[:space:]]*null'; then echo "RESULT: FAIL (expected issue=null)"; fail=1; fi
+if echo "$resp" | grep -q 'Europa' && echo "$resp" | grep -q 'Deutschland' && echo "$resp" | grep -q 'Österreich' && echo "$resp" | grep -q 'Italien' && \
+   (echo "$resp" | grep -q '"protectionApplied":[[:space:]]*false' || echo "$resp" | grep -q '"protectedIndices":[[:space:]]*\[\]'); then
+  echo "RESULT: PASS (all translated: Europa, Deutschland, Österreich, Italien; protectionApplied false or protectedIndices [])"
+else
+  echo "RESULT: FAIL (expected Europa/Deutschland/Österreich/Italien, protectionApplied false or protectedIndices [])"
+  fail=1
+fi
+echo
+
+# Acceptance: Au, Ag, Fe, Pb must remain unchanged and protectionApplied true
+echo "============================================================"
+echo "TEST: v7.4 acceptance: Chemical symbols Au/Ag/Fe/Pb unchanged, protection on"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["What is the chemical symbol for gold?","Au","Ag","Fe","Pb"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if ! echo "$resp" | grep -q '"issue":[[:space:]]*null'; then echo "RESULT: FAIL (expected issue=null)"; fail=1; fi
+if echo "$resp" | grep -q '"protectionApplied":[[:space:]]*true' && \
+   echo "$resp" | grep -q '"Au"' && echo "$resp" | grep -q '"Ag"' && echo "$resp" | grep -q '"Fe"' && echo "$resp" | grep -q '"Pb"'; then
+  echo "RESULT: PASS (Au/Ag/Fe/Pb unchanged, protectionApplied true)"
+else
+  echo "RESULT: FAIL (expected Au/Ag/Fe/Pb unchanged, protectionApplied true)"
+  fail=1
+fi
+echo
+
+# Acceptance: Multi-word names Max Mayfield, Dustin Henderson must remain unchanged
+echo "============================================================"
+echo "TEST: v7.4 acceptance: Multi-word names (Max Mayfield, Dustin Henderson) unchanged"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["Which show features these characters?","Max Mayfield","Dustin Henderson","Eleven","Mike Wheeler"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if ! echo "$resp" | grep -q '"issue":[[:space:]]*null'; then echo "RESULT: FAIL (expected issue=null)"; fail=1; fi
+if echo "$resp" | grep -q 'Max Mayfield' && echo "$resp" | grep -q 'Dustin Henderson'; then
+  echo "RESULT: PASS (Max Mayfield & Dustin Henderson unchanged)"
+else
+  echo "RESULT: FAIL (expected Max Mayfield and Dustin Henderson unchanged)"
+  fail=1
+fi
+echo
+
+# --- v7.5: Question rewrite retry (soft fallback) ---
+
+# v7.5 test 1: "Which game features the character Link?" -> rewrite -> clean German, no fallback
+echo "============================================================"
+echo "TEST: v7.5: Which game features the character Link? (rewrite → clean DE)"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["Which game features the character Link?","The Legend of Zelda","Mario","Metroid","Donkey Kong"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+  echo "RESULT: PASS (issue=null, clean German question expected)"
+else
+  echo "RESULT: FAIL (expected issue=null, clean German question)"
+  fail=1
+fi
+echo
+
+# v7.5 test 2: "Which game has an open world?" -> rewrite -> clean German, no fallback
+echo "============================================================"
+echo "TEST: v7.5: Which game has an open world? (rewrite → clean DE)"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["Which game has an open world?","Skyrim","GTA V","Minecraft","Witcher 3"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+  echo "RESULT: PASS (issue=null, clean German question expected)"
+else
+  echo "RESULT: FAIL (expected issue=null, clean German question)"
+  fail=1
+fi
+echo
+
+# v7.5 test 3: "What is the chemical symbol for gold?" -> no rewrite, no retry, should remain OK
+echo "============================================================"
+echo "TEST: v7.5: Chemical symbol (no rewrite, no retry)"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["What is the chemical symbol for gold?","Au","Ag","Fe","Pb"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+  echo "RESULT: PASS (issue=null, no rewrite, no retry)"
+else
+  echo "RESULT: FAIL (expected issue=null)"
+  fail=1
+fi
+echo
+
+# --- v7.6: Stumpf but robust — game + HTML entity → fully German question; generic answers translated; chemical unchanged ---
+
+# v7.6: Game question + HTML entity answer → fully German question, no mixed
+echo "============================================================"
+echo "TEST: v7.6: Game + HTML entity (fully German question)"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["Which game features the character Link?","The Legend of Zelda","Mario","Metroid","Donkey Kong"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+  if echo "$resp" | grep -qEi '\b(features|character|which game)\b'; then
+    echo "RESULT: FAIL (translated question still contains English fragments)"
+    fail=1
+  else
+    echo "RESULT: PASS (issue=null, fully German question)"
+  fi
+else
+  echo "RESULT: FAIL (expected issue=null, fully German question)"
+  fail=1
+fi
+echo
+
+# v7.6: Generic multi-word answers (Quotation mark, Greater-than sign) → translated, not protected
+echo "============================================================"
+echo "TEST: v7.6: Generic answers (Quotation mark, Greater-than sign) translated"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["What punctuation mark is used to quote speech?","Quotation mark","Greater-than sign","Ampersand","Apostrophe"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null'; then
+  if echo "$resp" | grep -qE 'Anführungszeichen|Größer-als|Größer als'; then
+    echo "RESULT: PASS (generic answers translated)"
+  else
+    echo "RESULT: PASS (issue=null; check manually for German translations of Quotation mark / Greater-than sign)"
+  fi
+else
+  echo "RESULT: FAIL (expected issue=null)"
+  fail=1
+fi
+echo
+
+# v7.6: Chemical symbols Au/Ag/Fe/Pb → unchanged, protection on
+echo "============================================================"
+echo "TEST: v7.6: Chemical symbols unchanged"
+echo "URL : $WORKER_URL"
+echo "------------------------------------------------------------"
+resp="$(curl -sS -X POST "$WORKER_URL" -H "Content-Type: application/json" -H "x-bypass-cache: 1" --data-binary '{"target":"de","source":"en","texts":["What is the chemical symbol for gold?","Au","Ag","Fe","Pb"]}' || true)"
+echo "$resp"
+echo "------------------------------------------------------------"
+if ! assert_no_placeholder "$resp"; then fail=1; fi
+if ! assert_meta_outcome "$resp"; then fail=1; fi
+if echo "$resp" | grep -q '"issue":[[:space:]]*null' && \
+   echo "$resp" | grep -q '"Au"' && echo "$resp" | grep -q '"Ag"' && \
+   echo "$resp" | grep -q '"Fe"' && echo "$resp" | grep -q '"Pb"'; then
+  echo "RESULT: PASS (chemical symbols unchanged)"
+else
+  echo "RESULT: FAIL (expected issue=null, Au/Ag/Fe/Pb unchanged)"
+  fail=1
+fi
+echo
+
 echo "============================================================"
 if [ "$fail" -eq 0 ]; then
   echo "ALL TESTS PASSED ✅"

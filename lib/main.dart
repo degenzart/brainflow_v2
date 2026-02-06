@@ -168,13 +168,24 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+class _FlowCardItem {
+  const _FlowCardItem({required this.localized, required this.original});
+  final CardModel localized;
+  final CardModel original;
+}
+
 class _HomeScreenState extends State<HomeScreen> {
   final _importer = const TriviaImporter();
   final _scaffoldKey = GlobalKey<ScaffoldState>();
 
   var _section = DrawerSection.flow;
   var _loading = true;
-  List<CardModel> _cards = const <CardModel>[];
+  List<_FlowCardItem> _cardPairs = const <_FlowCardItem>[];
+  bool _showOriginalText = false;
+
+  List<CardModel> _getDisplayedCards() => _showOriginalText
+      ? _cardPairs.map((e) => e.original).toList()
+      : _cardPairs.map((e) => e.localized).toList();
 
   // Settings state
   bool _hapticsEnabled = true;
@@ -217,14 +228,17 @@ class _HomeScreenState extends State<HomeScreen> {
         ? 'en'
         : currentLanguageCode;
 
-    var resolvedCards = rawCards
-        .map(
-          (card) =>
-              widget.repository.resolveForLocale(card, effectiveLanguageCode),
-        )
-        .toList(growable: false);
-
-    var total = resolvedCards.length;
+    var cardPairs = <_FlowCardItem>[];
+    for (final raw in rawCards) {
+      final resolved = widget.repository.resolveForLocale(raw, effectiveLanguageCode);
+      if (resolved != null) {
+        cardPairs.add(_FlowCardItem(
+          localized: resolved,
+          original: widget.repository.getOriginalCard(raw),
+        ));
+      }
+    }
+    var total = cardPairs.length;
     var remainingRatio = total > 0 ? 1.0 : 0.0;
     final importReason = total == 0 ? 'empty_db' : loadReason;
 
@@ -251,30 +265,34 @@ class _HomeScreenState extends State<HomeScreen> {
         attempt++;
       }
 
-      resolvedCards = rawCards
-          .map(
-            (card) =>
-                widget.repository.resolveForLocale(card, effectiveLanguageCode),
-          )
-          .toList(growable: false);
-
-      total = resolvedCards.length;
+      cardPairs = <_FlowCardItem>[];
+      for (final raw in rawCards) {
+        final resolved = widget.repository.resolveForLocale(raw, effectiveLanguageCode);
+        if (resolved != null) {
+          cardPairs.add(_FlowCardItem(
+            localized: resolved,
+            original: widget.repository.getOriginalCard(raw),
+          ));
+        }
+      }
+      total = cardPairs.length;
     }
 
     // If we just triggered an import and still got nothing back, keep showing the loader.
     // (We already waited ~5s above; this is just a defensive fallback.)
-    if (started && resolvedCards.isEmpty) {
+    if (started && cardPairs.isEmpty) {
       debugPrint('LOAD_CARDS_EMPTY_AFTER_IMPORT (keeping loader)');
       return;
     }
 
     if (!mounted) return;
     setState(() {
-      _cards = resolvedCards;
+      _cardPairs = cardPairs;
       _loading = false;
     });
+    final skipped = rawCards.length - cardPairs.length;
     debugPrint(
-      'LOAD_CARDS_DONE raw=${rawCards.length} resolved=${resolvedCards.length} lang=$effectiveLanguageCode',
+      'LOAD_CARDS_DONE raw=${rawCards.length} resolved=${cardPairs.length} skipped=$skipped lang=$effectiveLanguageCode',
     );
   }
 
@@ -303,19 +321,26 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!mounted) return;
       final rawCards = await widget.repository.load();
-      final resolvedCards = rawCards
-          .map((c) => widget.repository.resolveForLocale(c, effectiveLanguageCode))
-          .toList(growable: false);
+      final pairs = <_FlowCardItem>[];
+      for (final raw in rawCards) {
+        final resolved = widget.repository.resolveForLocale(raw, effectiveLanguageCode);
+        if (resolved != null) {
+          pairs.add(_FlowCardItem(
+            localized: resolved,
+            original: widget.repository.getOriginalCard(raw),
+          ));
+        }
+      }
       setState(() {
-        _cards = resolvedCards;
+        _cardPairs = pairs;
       });
       debugPrint(
-        'IMPORT_UI_REFRESH_DONE cards=${_cards.length} lang=$effectiveLanguageCode',
+        'IMPORT_UI_REFRESH_DONE cards=${pairs.length} lang=$effectiveLanguageCode',
       );
 
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(
-        SnackBar(content: Text(l10n.import_done(resolvedCards.length))),
+        SnackBar(content: Text(l10n.import_done(pairs.length))),
       );
     } catch (e) {
       messenger.hideCurrentSnackBar();
@@ -531,7 +556,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     Positioned.fill(
                       child: _loading
                           ? const Center(child: CircularProgressIndicator())
-                          : _cards.isEmpty
+                          : _cardPairs.isEmpty
                           ? Center(
                               child: Padding(
                                 padding: const EdgeInsets.all(24),
@@ -545,7 +570,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             )
                           : _FlowView(
-                              cards: _cards,
+                              cards: _getDisplayedCards(),
+                              onToggleOriginal: () => setState(() => _showOriginalText = !_showOriginalText),
+                              showOriginalText: _showOriginalText,
                               onReport: _openReportSheet,
                               hapticsEnabled: _hapticsEnabled,
                               onConsumed: (currentIndex, total) {
@@ -605,7 +632,7 @@ class _HomeScreenState extends State<HomeScreen> {
             )
           : _loading
           ? const Center(child: CircularProgressIndicator())
-          : _cards.isEmpty
+          : _cardPairs.isEmpty
           ? Center(
               child: Padding(
                 padding: const EdgeInsets.all(24),
@@ -1227,12 +1254,16 @@ class _FlowView extends StatefulWidget {
     required this.onReport,
     required this.hapticsEnabled,
     this.onConsumed,
+    this.onToggleOriginal,
+    this.showOriginalText = false,
   });
 
   final List<CardModel> cards;
   final Future<void> Function(CardModel card) onReport;
   final bool hapticsEnabled;
   final void Function(int currentIndex, int total)? onConsumed;
+  final VoidCallback? onToggleOriginal;
+  final bool showOriginalText;
 
   @override
   State<_FlowView> createState() => _FlowViewState();
@@ -1585,12 +1616,13 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
                                 context,
                                 cardStackKey,
                               ),
-                              // Answer feedback state (only for active card)
                               isAnswered: isActive ? _isAnswered : false,
                               selectedAnswer:
                                   isActive ? _selectedAnswer : null,
                               isCorrectlyAnswered:
                                   isActive ? _isCorrectlyAnswered : false,
+                              onToggleOriginal: widget.onToggleOriginal,
+                              showOriginalText: widget.showOriginalText,
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -1711,6 +1743,8 @@ class _FlowCard extends StatelessWidget {
     required this.isAnswered,
     required this.selectedAnswer,
     required this.isCorrectlyAnswered,
+    this.onToggleOriginal,
+    this.showOriginalText = false,
   });
   final CardModel card;
   final _CategoryStyle style;
@@ -1719,6 +1753,8 @@ class _FlowCard extends StatelessWidget {
   final bool isAnswered;
   final String? selectedAnswer;
   final bool isCorrectlyAnswered;
+  final VoidCallback? onToggleOriginal;
+  final bool showOriginalText;
 
   // Fixed layout metrics for the Flow card (answers get priority so question can shrink)
   static const double _iconZoneBaseHeight = 72.0;
@@ -1776,33 +1812,62 @@ class _FlowCard extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 8),
-            // Zone 2: Question box with max height; can shrink so answers always fit
+            // Zone 2: Question box with max height; toggle original (bottom-right)
             Flexible(
               child: ConstrainedBox(
                 constraints: BoxConstraints(maxHeight: questionZoneHeight),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: cs.surface.withValues(alpha: 0.45),
-                    borderRadius: BorderRadius.circular(14),
-                    border: Border.all(
-                      color: style.color.withValues(alpha: 0.18),
-                      width: 1,
-                    ),
-                  ),
-                  child: Center(
-                    child: _AutoFitText(
-                      text: card.question,
-                      textAlign: TextAlign.center,
-                      maxLines: 5,
-                      minFontSize: 10.0,
-                      maxFontSize: 20.0,
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: cs.surface.withValues(alpha: 0.45),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: style.color.withValues(alpha: 0.18),
+                          width: 1,
+                        ),
+                      ),
+                      child: Center(
+                        child: _AutoFitText(
+                          text: card.question,
+                          textAlign: TextAlign.center,
+                          maxLines: 5,
+                          minFontSize: 10.0,
+                          maxFontSize: 20.0,
+                          style: theme.textTheme.headlineSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    if (onToggleOriginal != null)
+                      Positioned(
+                        right: 12,
+                        bottom: 12,
+                        child: Material(
+                          color: cs.surface.withValues(alpha: 0.7),
+                          borderRadius: BorderRadius.circular(15),
+                          child: InkWell(
+                            onTap: onToggleOriginal,
+                            borderRadius: BorderRadius.circular(15),
+                            child: SizedBox(
+                              width: 30,
+                              height: 30,
+                              child: Icon(
+                                showOriginalText
+                                    ? Icons.public
+                                    : Icons.translate,
+                                size: 18,
+                                color: cs.onSurface.withValues(alpha: 0.75),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),

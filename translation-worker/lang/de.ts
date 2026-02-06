@@ -1,8 +1,9 @@
 /**
- * German language pack: postprocess, protection (strong signals only), allowUnchanged, isBadTranslation.
+ * German language pack: postprocess, protection (v7.6 only non-translatables), allowUnchanged, isBadTranslation.
  * MUST NOT protect answers just because they start with uppercase (German nouns).
  */
 
+import { isKnownAbbreviation } from "./abbreviations";
 import type { LanguagePack } from "./types";
 
 // English fragments that must not appear in a translated DE question. Exclude cognates valid in German (e.g. "Album", "Band", "Computer").
@@ -26,19 +27,20 @@ const KNOWN_TRANSLATABLE = new Set([
   "netherlands", "belgium", "switzerland", "sweden", "norway", "denmark", "finland", "poland",
   "greece", "portugal", "ireland", "scotland", "wales", "uk", "usa", "united states", "united kingdom",
 ]);
-// v7.3.2: Title-Case answers containing any of these are NOT protected (translate: Pulmonary Artery, Spanish Flu, etc.).
-const DE_GENERIC_WORDS = new Set([
+// v7.6: Generic nouns — any phrase containing any of these is NOT protected (translate: Quotation mark, Greater-than sign, etc.).
+const DE_GENERIC_NOUNS = new Set([
   "artery", "vein", "vision", "disease", "syndrome", "flu", "war", "treaty", "empire", "kingdom",
   "republic", "revolution", "battle", "element", "symbol", "acid", "base", "muscle", "bone", "nerve",
   "pandemic", "virus", "river", "mountain", "capital", "president",
+  "mark", "sign", "season", "episode", "character", "game", "album", "city", "country",
 ]);
 // v7.4: Do NOT protect common German articles/pronouns when they appear alone.
 const DE_ALONE_ARTICLE = new Set(["der", "die", "das", "ein", "eine"]);
 
-/** v7.3.1: Case-insensitive. True if any token (incl. not first) is in generic list. */
-function containsGenericWord(answer: string): boolean {
+/** v7.6: Case-insensitive. True if any token is in generic-nouns list. */
+function containsGenericNoun(answer: string): boolean {
   const tokens = (answer ?? "").trim().split(/\s+/).filter(Boolean);
-  return tokens.some((w) => DE_GENERIC_WORDS.has(normalize(w)));
+  return tokens.some((w) => DE_GENERIC_NOUNS.has(normalize(w)));
 }
 
 // v7.3.1: Common German nouns that indicate proper noun mistranslation (e.g. Eleven -> Elf).
@@ -102,7 +104,55 @@ function questionMeaningfullyChanged(origQ: string, transQ: string): boolean {
   return normalize(o) !== normalize(t);
 }
 
-/** English function-word fragments that must not appear in a translated DE question. */
+/** v7.6: True if question text is clearly German — do not flag english fragments when this holds. */
+export function isClearlyGerman(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  const lower = t.toLowerCase();
+  const deFunction = /\b(welche|welcher|welches|was|wann|wo|warum|wie|in welchem|in welcher)\b/i;
+  const deVerbsNouns = /\b(kommt|taucht|bedeutet|steht für|figur|staffel)\b/i;
+  const umlauts = /[äöüÄÖÜß]/;
+  const articles = /\b(das|der|die)\b/i;
+  return deFunction.test(t) || deVerbsNouns.test(lower) || umlauts.test(t) || articles.test(t);
+}
+
+/** v7.6: True if original question is about code/HTML — disable english-fragment failure for these. */
+export function isCodeOrHtmlQuestion(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  return /HTML/i.test(t) || /[<>]/.test(t) || /&(#|quot|amp|lt|gt|apos)/i.test(t) || /[{};]/.test(t) || /&#\d/.test(t);
+}
+
+/** v7.6: English tokens that must not appear in a translated DE question (stumpf but robust). */
+const EN_FRAGMENT_TOKENS = new Set([
+  "features", "character", "which", "what", "the", "of", "in", "season", "episode", "game", "album",
+  "recorded", "appears", "stands", "for", "who", "where", "when", "how", "does", "did", "do", "is", "are",
+  "with", "record", "records", "recording", "released", "release",
+]);
+/** v7.6: Compute ratio of words that are English fragments (0..1). */
+function englishFragmentRatio(text: string): number {
+  const t = (text ?? "").trim();
+  if (!t) return 0;
+  const words = t.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return 0;
+  let count = 0;
+  for (const w of words) {
+    const key = normalize(w).replace(/[^\w]/g, "");
+    if (key.length > 0 && EN_FRAGMENT_TOKENS.has(key)) count++;
+  }
+  return count / words.length;
+}
+/** v7.6: True if translated question still contains English fragments (DE target). */
+export function containsEnglishFragments(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  const words = t.split(/\s+/).filter(Boolean);
+  return words.some((w) => {
+    const key = normalize(w).replace(/[^\w]/g, "");
+    return key.length > 0 && EN_FRAGMENT_TOKENS.has(key);
+  });
+}
+/** Legacy: pattern-based check used in validation. */
 const EN_FRAGMENT_PATTERNS = [
   /\bis\s+the\b/i, /\bwith\s+/i, /\bwhich\b/i, /\bin\s+the\b/i,
   /\bno\s+breaks\b/i, /\bline-up\b/i, /\bthe\s+album\b/i,
@@ -110,7 +160,51 @@ const EN_FRAGMENT_PATTERNS = [
 ];
 function detectEnglishFragments(text: string): boolean {
   const t = (text ?? "").trim();
-  return EN_FRAGMENT_PATTERNS.some((re) => re.test(t));
+  return EN_FRAGMENT_PATTERNS.some((re) => re.test(t)) || containsEnglishFragments(t);
+}
+
+/** v7.6: Deterministic German rewrite when bad_result due to question_has_english_fragments (stumpf but no mixed). */
+export function getStumpfGermanRewrite(originalQuestion: string): string | null {
+  const q = (originalQuestion ?? "").trim();
+  if (!q) return null;
+  const m1 = q.match(/^\s*Which\s+game\s+features\s+the\s+character\s+(.+?)\s*\??\s*$/i);
+  if (m1) return "In welchem Spiel kommt die Figur " + (m1[1] as string).trim() + " vor?";
+  const m2 = q.match(/^\s*Which\s+character\s+appears\s+in\s+(.+?)\s*\??\s*$/i);
+  if (m2) return "Welche Figur kommt in " + (m2[1] as string).trim() + " vor?";
+  return null;
+}
+
+/** v7.7: Forced German rewrite for game questions when mixed-language fallback would occur. Always returns a string. */
+export function forceRewriteGameQuestion(original: string): string {
+  const q = (original ?? "").trim();
+  if (!q) return "In welchem Spiel kommt diese Figur vor?";
+  const m = q.match(/the\s+character\s+([A-Za-z0-9\s'\u00C0-\u024F-]+?)\s*\??\s*$/i)
+    || q.match(/character\s+([A-Za-z0-9\s'\u00C0-\u024F-]+?)\s*\??\s*$/i);
+  const entity = m ? (m[1] as string).trim() : null;
+  if (entity && entity.length > 0 && entity.length <= 80) {
+    return "In welchem Spiel kommt die Figur " + entity + " vor?";
+  }
+  return "In welchem Spiel kommt diese Figur vor?";
+}
+
+const DE_FORCE_REWRITE_RULE = "de_force_rewrite_template";
+
+/** v7.7: Forced German rewrite with rule name for meta.postProcessRulesApplied. Minimal, safe templates. */
+export function forceRewriteGermanQuestion(originalQuestion: string): { text: string; rule: string } {
+  const q = (originalQuestion ?? "").trim();
+  if (!q) return { text: "Worum geht es in dieser Frage?", rule: DE_FORCE_REWRITE_RULE };
+  const hasWhichGame = /which\s+game/i.test(q);
+  const hasCharacter = /character/i.test(q);
+  const charMatch = q.match(/the\s+character\s+([A-Za-z0-9\s'\u00C0-\u024F-]+?)\s*\??\s*$/i)
+    || q.match(/character\s+([A-Za-z0-9\s'\u00C0-\u024F-]+?)\s*\??\s*$/i);
+  const entity = charMatch ? (charMatch[1] as string).trim() : null;
+  if (hasWhichGame && hasCharacter && entity && entity.length > 0 && entity.length <= 80) {
+    return { text: "In welchem Spiel kommt die Figur " + entity + " vor?", rule: DE_FORCE_REWRITE_RULE };
+  }
+  if (/which/i.test(q) && hasCharacter) {
+    return { text: "Welche Figur kommt in diesem Spiel vor?", rule: DE_FORCE_REWRITE_RULE };
+  }
+  return { text: "Worum geht es in dieser Frage?", rule: DE_FORCE_REWRITE_RULE };
 }
 
 /** German-only signals: stopwords or umlauts. */
@@ -154,51 +248,41 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
-/** v7.4: Protect proper nouns/terms. No "starts with uppercase => protect". Do NOT protect German articles alone. */
+/**
+ * v7.6: Protect ONLY non-translatables. Generic multi-word Title Case (Quotation mark, Greater-than sign) is NOT protected.
+ * Protect TRUE: digits, ALL CAPS >=2, chemical/math/code token, short mixed alnum (Xbox360), <=3 chars in known abbreviations.
+ * Protect FALSE: generic nouns (mark, sign, symbol, season, episode, character, game, album, city, country, etc.), single-word Title Case.
+ */
 function shouldProtectAnswerDE(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
 
-  // v7.4: Do NOT protect common German articles/pronouns when they appear alone.
   if (t.split(/\s+/).filter(Boolean).length === 1 && DE_ALONE_ARTICLE.has(normalize(t))) return false;
+  if (containsGenericNoun(t)) return false;
 
-  // v7.3.1: Generic medical/history/science terms MUST NOT be protected (override any other heuristic).
-  if (containsGenericWord(t)) return false;
-
-  // a) Contains digits OR roman numerals
   if (/\d/.test(t)) return true;
-  if (/^[IVXLCDM]+$/i.test(t) && t.length >= 1) return true;
+  if (/^[A-Z]{2,}$/.test(t)) return true;
+  if (/^[A-Z]{2,}(\.[A-Z]+)*$/.test(t)) return true;
 
-  // b) ALL CAPS (>=2 letters)
-  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
-  if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
+  // Chemical/math/code: _ / \ : @ # . = + - (with alnum), or 0x, or IPv4
+  if (/[_/\\:@#.=+-]/.test(t) && /\w/.test(t)) return true;
+  if (/0x/i.test(t)) return true;
+  if (/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(t)) return true;
 
-  // c) Underscores, __, PROTECT_, or ID/code-like (hex, GUID, SKU)
-  if (/[_]|__|PROTECT_/.test(t)) return true;
-  if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
-
-  // d) Single token: CamelCase (internal capital) OR length>=4 with leading capital (Radiohead, Oasis, Eleven)
   const tokens = t.split(/\s+/).filter(Boolean);
   if (tokens.length === 1) {
     const w = tokens[0]!;
-    if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(w)) return true;
-    if (w.length >= 4 && /^[A-Z]\p{L}*$/u.test(w)) return true;
-    // Chemical symbol: 1–3 letters, first capital (Au, Ag, Fe)
-    if (/^[A-Z][a-zA-Z]{0,2}$/.test(w)) return true;
+    if (w.length <= 3 && /^[A-Za-z]+$/.test(w) && isKnownAbbreviation(w)) return true;
+    if (/[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]/.test(w) && w.length <= 20) return true; // Xbox360, iPhone12
   }
 
-  // e) Contains apostrophe, hyphen, colon, or parentheses (names/titles)
-  if (/['\-:()]/.test(t)) return true;
-  if (/[.&\/']/.test(t)) return true;
+  if (/[a-z][A-Z]/.test(t)) return true;
+  if (/[A-Z]{2,}[a-z]/.test(t)) return true;
+  if (tokens.length >= 2 && /[A-Z]/.test(t) && !containsGenericNoun(t)) return true;
 
-  // f) Title Case multiword (e.g. Pulmonary Artery, Max Mayfield) — already excluded generic above
-  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) return true;
-
-  // Known brand/name regex (AC/DC, iPhone, OK Computer, etc.)
   for (const re of KNOWN_BRAND_NAME_PATTERNS) {
     if (re.test(t)) return true;
   }
-
   return false;
 }
 
@@ -369,10 +453,19 @@ export const dePack: LanguagePack = {
       }
     }
 
-    if (detectEnglishFragments(trans[0] ?? "")) {
-      reasons.push("question_contains_english_fragments");
+    // v7.6: Only flag english fragments when question is NOT clearly German and NOT code/HTML, and ratio >= 0.35.
+    const transQuestion = trans[0] ?? "";
+    const origQuestion = orig[0] ?? "";
+    if (isCodeOrHtmlQuestion(origQuestion)) {
+      reasons.push("code_question"); // debug hint only; not in badReasons
+    } else if (!isClearlyGerman(transQuestion)) {
+      const ratio = englishFragmentRatio(transQuestion);
+      if (ratio >= 0.35 && (detectEnglishFragments(transQuestion) || containsEnglishFragments(transQuestion))) {
+        reasons.push("question_contains_english_fragments");
+        reasons.push("question_has_english_fragments");
+      }
     }
-    if (detectMixedLanguageInQuestion(trans[0] ?? "", orig[0] ?? "")) {
+    if (detectMixedLanguageInQuestion(transQuestion, origQuestion)) {
       reasons.push("mixed_language_in_question");
     }
 
@@ -416,7 +509,7 @@ export const dePack: LanguagePack = {
 
     const badReasons = new Set([
       "length_mismatch", "fewer_than_two_answers", "empty_question", "all_answers_empty",
-      "too_many_unchanged_non_protected", "all_answers_unchanged",
+      "too_many_unchanged_non_protected", "all_answers_unchanged", "question_has_english_fragments",
     ]);
     const hasBad = reasons.some((r) => badReasons.has(r));
     const level = hasBad ? "bad" : reasons.length > 0 ? "fallback" : "good";

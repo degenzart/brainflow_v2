@@ -1,7 +1,8 @@
 /**
- * Spanish language pack: identity postprocess for now, same structure + mixed detection as DE.
+ * Spanish language pack: identity postprocess, v7.6 protection parity with DE.
  */
 
+import { isKnownAbbreviation } from "./abbreviations";
 import type { LanguagePack } from "./types";
 
 const KNOWN_BRAND_PATTERNS = [
@@ -15,17 +16,17 @@ const KNOWN_TRANSLATABLE = new Set([
   "netherlands", "belgium", "switzerland", "sweden", "norway", "denmark", "finland", "poland",
   "greece", "portugal", "ireland", "scotland", "wales", "uk", "usa", "united states", "united kingdom",
 ]);
-// v7.3.2: Title-Case answers containing any of these are NOT protected (mirror DE).
-const ES_GENERIC_WORDS = new Set([
+// v7.6: Generic nouns — any phrase containing any of these is NOT protected (mirror DE).
+const ES_GENERIC_NOUNS = new Set([
   "artery", "vein", "vision", "disease", "syndrome", "flu", "war", "treaty", "empire", "kingdom",
   "republic", "revolution", "battle", "element", "symbol", "acid", "base", "muscle", "bone", "nerve",
   "pandemic", "virus", "river", "mountain", "capital", "president",
+  "mark", "sign", "season", "episode", "character", "game", "album", "city", "country",
 ]);
 
-/** v7.3.1: Case-insensitive. True if any token is in generic list. */
-function containsGenericWordES(answer: string): boolean {
+function containsGenericNounES(answer: string): boolean {
   const tokens = (answer ?? "").trim().split(/\s+/).filter(Boolean);
-  return tokens.some((w) => ES_GENERIC_WORDS.has(normalize(w)));
+  return tokens.some((w) => ES_GENERIC_NOUNS.has(normalize(w)));
 }
 
 function normalize(s: string): string {
@@ -58,27 +59,32 @@ function isLikelyProperNounOrNumericOrShort(answer: string): boolean {
   return false;
 }
 
-/** v7.4: Protect proper nouns/terms. No "starts with uppercase => protect". */
+/**
+ * v7.6: Protect ONLY non-translatables. Same rules as DE: digits, ALL CAPS, chemical/math/code, abbreviations, mixed alnum.
+ */
 function shouldProtectAnswerES(answer: string): boolean {
   const t = (answer ?? "").trim();
   if (!t || t.length > 120) return false;
-  if (containsGenericWordES(t)) return false;
+  if (containsGenericNounES(t)) return false;
+
   if (/\d/.test(t)) return true;
-  if (/^[IVXLCDM]+$/i.test(t) && t.length >= 1) return true;
-  if (/^[A-Z0-9\s\p{P}]+$/u.test(t) && /[A-Z]{2,}/.test(t)) return true;
-  if (/\b[A-Z]{2,}(\.[A-Z]+)*\b/.test(t)) return true;
-  if (/[_]|__|PROTECT_/.test(t)) return true;
-  if (/^[0-9a-fA-F-]{8,}$/.test(t) || /^[A-Z0-9]{4,}-[A-Z0-9]+$/i.test(t)) return true;
+  if (/^[A-Z]{2,}$/.test(t)) return true;
+  if (/^[A-Z]{2,}(\.[A-Z]+)*$/.test(t)) return true;
+  if (/[_/\\:@#.=+-]/.test(t) && /\w/.test(t)) return true;
+  if (/0x/i.test(t)) return true;
+  if (/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/.test(t)) return true;
+
   const tokens = t.split(/\s+/).filter(Boolean);
   if (tokens.length === 1) {
     const w = tokens[0]!;
-    if (/[a-z][A-Z]|[A-Z][a-z].*[A-Z]/.test(w)) return true;
-    if (w.length >= 4 && /^[A-Z]\p{L}*$/u.test(w)) return true;
-    if (/^[A-Z][a-zA-Z]{0,2}$/.test(w)) return true;
+    if (w.length <= 3 && /^[A-Za-z]+$/.test(w) && isKnownAbbreviation(w)) return true;
+    if (/[a-zA-Z].*[0-9]|[0-9].*[a-zA-Z]/.test(w) && w.length <= 20) return true;
   }
-  if (/['\-:()]/.test(t)) return true;
-  if (/[.&\/']/.test(t)) return true;
-  if (tokens.length >= 2 && tokens.length <= 4 && tokens.every((w) => /^[A-Z]\p{L}*$/u.test(w))) return true;
+
+  if (/[a-z][A-Z]/.test(t)) return true;
+  if (/[A-Z]{2,}[a-z]/.test(t)) return true;
+  if (tokens.length >= 2 && /[A-Z]/.test(t) && !containsGenericNounES(t)) return true;
+
   for (const re of KNOWN_BRAND_PATTERNS) {
     if (re.test(t)) return true;
   }

@@ -17,6 +17,8 @@ export interface Env {
   TRANSLATE_DAILY_REQ_LIMIT?: string;
   /** Optional per-day character limit; empty/undefined = off. */
   TRANSLATE_DAILY_CHAR_LIMIT?: string;
+  /** Optional engine override: "v3" | "v2" | unset = auto (v3 if configured). */
+  TRANSLATE_ENGINE?: string;
 }
 
 const DEBUG_BUILD = "bf-dev-answers-v7.7";
@@ -165,6 +167,8 @@ type TranslateBatchResponse = {
     rewriteApplied?: boolean;
     /** Which engine handled the request. */
     engine?: "v2" | "v3";
+    /** Env TRANSLATE_ENGINE value seen (or "auto"). For debugging. */
+    engineRequested?: string;
     /** v3: whether glossary was requested for this call (en->de + glossary configured). */
     glossaryRequested?: boolean;
     /** v3: whether glossary translations were actually used by Google. */
@@ -725,13 +729,17 @@ export default {
     let rewriteApplied = false;
     let htmlEntitiesDetectedInOutput = false;
 
-    const useV3 =
+    const enginePref = String(env.TRANSLATE_ENGINE ?? "").trim().toLowerCase();
+    const forceV3 = enginePref === "v3";
+    const forceV2 = enginePref === "v2";
+    const v3Configured =
       env.GOOGLE_V3_PROJECT_ID != null &&
       String(env.GOOGLE_V3_PROJECT_ID).trim() !== "" &&
       env.GOOGLE_V3_LOCATION != null &&
       String(env.GOOGLE_V3_LOCATION).trim() !== "" &&
       env.GOOGLE_SERVICE_ACCOUNT_JSON != null &&
       String(env.GOOGLE_SERVICE_ACCOUNT_JSON).trim() !== "";
+    const useV3 = forceV3 || (!forceV2 && v3Configured);
 
     let engine: "v2" | "v3" | undefined;
     let glossaryRequested = false;
@@ -1025,6 +1033,7 @@ export default {
               rewriteApplied: false,
               protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
               protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
+              engineRequested: enginePref || "auto",
             }),
           } satisfies TranslateBatchResponse,
           { status: 200 }
@@ -1108,6 +1117,7 @@ export default {
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
           engine,
+          engineRequested: enginePref || "auto",
           glossaryRequested,
           glossaryUsed,
           quota: quotaMeta,
@@ -1167,6 +1177,7 @@ export default {
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
           engine,
+          engineRequested: enginePref || "auto",
           glossaryRequested,
           glossaryUsed,
           quota: quotaMeta,
