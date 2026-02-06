@@ -8,3 +8,7 @@ compatibility_date = "2025-01-01"
 kv_namespaces = [
   { binding = "TRANSLATION_CACHE", id = "f4abced6f5e64f45977df126924fc27a" }
 ]
+
+[vars]
+TRANSLATE_DAILY_CHAR_LIMIT = ""
+TRANSLATE_DAILY_REQ_LIMIT = ""

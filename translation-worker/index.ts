@@ -13,6 +13,10 @@ export interface Env {
   GOOGLE_SERVICE_ACCOUNT_JSON?: string;
   /** v3: optional glossary ID (e.g. brainflow-en-de-main). Must exist in GOOGLE_V3_LOCATION. */
   GOOGLE_V3_GLOSSARY?: string;
+  /** Optional per-day request limit; empty/undefined = off. */
+  TRANSLATE_DAILY_REQ_LIMIT?: string;
+  /** Optional per-day character limit; empty/undefined = off. */
+  TRANSLATE_DAILY_CHAR_LIMIT?: string;
 }
 
 const DEBUG_BUILD = "bf-dev-answers-v7.7";
@@ -24,7 +28,7 @@ function toGlobalProtectedIndices(answerRelativeIndices: number[]): number[] {
 }
 
 /** NON-NEGOTIABLE: any output containing placeholders forces fallback_original. */
-const PLACEHOLDER_PATTERN = /PROTECT_|__PROTECT|PROT_\d/;
+const PLACEHOLDER_PATTERN = /__BFPROT_|__PROTECT_|PROT_\d/;
 function containsPlaceholder(texts: string[]): boolean {
   return texts.some((t) => PLACEHOLDER_PATTERN.test(t ?? ""));
 }
@@ -159,6 +163,19 @@ type TranslateBatchResponse = {
     protectedIndicesInitial?: number[];
     protectedIndicesFinal?: number[];
     rewriteApplied?: boolean;
+    /** Which engine handled the request. */
+    engine?: "v2" | "v3";
+    /** v3: whether glossary was requested for this call (en->de + glossary configured). */
+    glossaryRequested?: boolean;
+    /** v3: whether glossary translations were actually used by Google. */
+    glossaryUsed?: boolean;
+    /** Optional per-day quota info when limits are configured. */
+    quota?: {
+      req: number;
+      chars: number;
+      limitReq: number | null;
+      limitChars: number | null;
+    };
   };
 };
 
@@ -183,6 +200,16 @@ function badRequestWithMeta(message: string): Response {
 
 function serverError(message: string): Response {
   return json({ error: message } satisfies ErrorResponse, { status: 500 });
+}
+
+/** Parse optional positive integer from env-style string; returns null when unset/invalid. */
+function parseOptionalInt(raw: string | undefined): number | null {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
 }
 
 function buildMetaBase(
@@ -300,7 +327,7 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
   let protectedText = text;
   let tokenIndex = counter.value;
   protectedText = protectedText.replace(/"([^"]+)"/g, (match) => {
-    const token = `__PROTECT_${tokenIndex++}__`;
+    const token = `__BFPROT_${tokenIndex++}__`;
     replacements.push({ token, original: match });
     return token;
   });
@@ -308,7 +335,7 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
     if (match.split(/\s+/).length < 2) return match;
     const commonWords = /\b(The|A|An|Of|In|On|At|To|For|With|By)\b/i;
     if (commonWords.test(match) && match.split(/\s+/).length === 2) return match;
-    const token = `__PROTECT_${tokenIndex++}__`;
+    const token = `__BFPROT_${tokenIndex++}__`;
     replacements.push({ token, original: match });
     return token;
   });
@@ -316,7 +343,7 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
   protectedText = protectedText.replace(
     new RegExp(`\\b(album|track|song|band|artist|title|film|movie|game)\\s+(${titleWord}(?:\\s+${titleWord})+)`, "gi"),
     (match: string, indicator: string, title: string) => {
-      const token = `__PROTECT_${tokenIndex++}__`;
+      const token = `__BFPROT_${tokenIndex++}__`;
       replacements.push({ token, original: title });
       return indicator + " " + token;
     },
@@ -327,9 +354,14 @@ function applyProtection(text: string, counter: { value: number }): ProtectionRe
 
 function restoreProtection(text: string, replacements: Array<{ token: string; original: string }>): string {
   let restored = text;
+  const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   for (let i = replacements.length - 1; i >= 0; i--) {
     const { token, original } = replacements[i];
-    restored = restored.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), original);
+    restored = restored.replace(new RegExp(escapeRe(token), "g"), original);
+    const legacyToken = token.replace("__BFPROT_", "__PROTECT_");
+    if (legacyToken !== token) {
+      restored = restored.replace(new RegExp(escapeRe(legacyToken), "g"), original);
+    }
   }
   return restored;
 }
@@ -420,7 +452,7 @@ async function translateWithGoogleV3(
   params: Required<TranslateBatchRequest>,
   env: Env,
   protectedFullTextIndices: number[]
-): Promise<{ translated: string[]; protectionApplied: boolean }> {
+): Promise<{ translated: string[]; protectionApplied: boolean; glossaryRequested: boolean; glossaryUsed: boolean }> {
   const projectId = envRequired("GOOGLE_V3_PROJECT_ID", env.GOOGLE_V3_PROJECT_ID);
   const location = envRequired("GOOGLE_V3_LOCATION", env.GOOGLE_V3_LOCATION);
   const jsonRaw = envRequired("GOOGLE_SERVICE_ACCOUNT_JSON", env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -453,16 +485,22 @@ async function translateWithGoogleV3(
 
   const accessToken = await getGoogleAccessTokenFromServiceAccount(sa);
   const url = `https://translate.googleapis.com/v3/projects/${projectId}/locations/${location}:translateText`;
+  const sourceLanguageCode = String(params.source ?? "en").trim().toLowerCase();
+  const targetLanguageCode = String(params.target ?? "").trim().toLowerCase();
+  const glossary = String(env.GOOGLE_V3_GLOSSARY ?? "").trim();
+
   const body: Record<string, unknown> = {
     contents: protectedTexts,
     mimeType: "text/plain",
-    sourceLanguageCode: "en",
-    targetLanguageCode: params.target,
+    sourceLanguageCode,
+    targetLanguageCode,
   };
-  if (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "") {
-    body.glossaryConfig = {
-      glossary: `projects/${projectId}/locations/${location}/glossaries/${env.GOOGLE_V3_GLOSSARY.trim()}`,
-    };
+
+  const glossaryRequested =
+    glossary.length > 0 && sourceLanguageCode === "en" && targetLanguageCode === "de";
+
+  if (glossaryRequested) {
+    body.glossaryConfig = { glossary: `projects/${projectId}/locations/${location}/glossaries/${glossary}` };
   }
 
   const res = await fetch(url, {
@@ -475,24 +513,36 @@ async function translateWithGoogleV3(
   });
   const text = await res.text();
   if (!res.ok) throw new Error(`Google Translate v3 error ${res.status}: ${text}`);
-  let decoded: { translations?: Array<{ translatedText?: string }> };
+  let decoded: {
+    translations?: Array<{ translatedText?: string }>;
+    glossaryTranslations?: Array<{ translatedText?: string }>;
+  };
   try {
-    decoded = JSON.parse(text) as { translations?: Array<{ translatedText?: string }> };
+    decoded = JSON.parse(text) as {
+      translations?: Array<{ translatedText?: string }>;
+      glossaryTranslations?: Array<{ translatedText?: string }>;
+    };
   } catch {
     throw new Error("Google Translate v3 returned non-JSON response.");
   }
-  const translations = decoded?.translations;
-  if (!Array.isArray(translations)) throw new Error("Google Translate v3 response missing translations.");
+  const baseTranslations = decoded?.translations;
+  const glossaryTranslations = decoded?.glossaryTranslations;
+  const glossaryUsed = Array.isArray(glossaryTranslations) && glossaryTranslations.length > 0;
+  const chosen = glossaryUsed ? glossaryTranslations : baseTranslations;
+  if (!Array.isArray(chosen)) throw new Error("Google Translate v3 response missing translations.");
 
-  const out: string[] = translations.map((t: { translatedText?: string }, idx: number) => {
+  const out: string[] = chosen.map((t: { translatedText?: string }, idx: number) => {
     const translated = typeof t?.translatedText === "string" ? t.translatedText : "";
-    return restoreProtection(translated, allReplacements[idx] || []);
+    return translated;
   });
+  for (let i = 0; i < out.length; i++) {
+    out[i] = restoreProtection(out[i], allReplacements[i] || []);
+  }
   for (const i of protectedFullTextIndices) {
     out[i] = (params.texts[i] ?? "").trim();
   }
   const protectionApplied = protectedFullTextIndices.length > 0 || allReplacements.some((r) => r.length > 0);
-  return { translated: out, protectionApplied };
+  return { translated: out, protectionApplied, glossaryRequested, glossaryUsed };
 }
 
 async function translateWithGoogleV2(
@@ -548,8 +598,11 @@ async function translateWithGoogleV2(
 
   const out: string[] = translations.map((t: any, idx: number) => {
     const translated = typeof t?.translatedText === "string" ? t.translatedText : "";
-    return restoreProtection(translated, allReplacements[idx] || []);
+    return translated;
   });
+  for (let i = 0; i < out.length; i++) {
+    out[i] = restoreProtection(out[i], allReplacements[i] || []);
+  }
   for (const i of protectedFullTextIndices) {
     out[i] = (params.texts[i] ?? "").trim();
   }
@@ -596,8 +649,8 @@ export default {
     const question = decodedTexts[0] ?? "";
     const answers = decodedTexts.slice(1);
     // Protection applies ONLY to answers (indices 1..n-1). Never to question (index 0).
-    const protectedAnswerIndices = pack.getProtectedAnswerIndices(answers);
-    const protectedFullTextIndices = protectedAnswerIndices.map((ai) => ai + 1).filter((i) => i >= 1);
+    const protectedAnswerIndices: number[] = [];
+    const protectedFullTextIndices: number[] = [];
 
     if (debugLoggingEnabled && protectedAnswerIndices.length > 0) {
       logDebug(`protected indices (global, never 0): ${JSON.stringify(toGlobalProtectedIndices(protectedAnswerIndices))}`);
@@ -680,6 +733,10 @@ export default {
       env.GOOGLE_SERVICE_ACCOUNT_JSON != null &&
       String(env.GOOGLE_SERVICE_ACCOUNT_JSON).trim() !== "";
 
+    let engine: "v2" | "v3" | undefined;
+    let glossaryRequested = false;
+    let glossaryUsed = false;
+
     async function runTranslate(protectedIndices: number[]): Promise<{
       translated: string[];
       protectionApplied: boolean;
@@ -689,7 +746,6 @@ export default {
       let rawTranslated: string[];
       let protectionApplied: boolean;
       if (useV3) {
-        console.log("TRANSLATE_ENGINE v3 glossary=" + (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "" ? "on" : "off"));
         const result = await translateWithGoogleV3(
           { target: params.target, source: params.source ?? "en", texts: decodedTexts },
           env,
@@ -697,8 +753,10 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        engine = "v3";
+        glossaryRequested = glossaryRequested || result.glossaryRequested;
+        glossaryUsed = glossaryUsed || result.glossaryUsed;
       } else {
-        console.log("TRANSLATE_ENGINE v2");
         const result = await translateWithGoogleV2(
           { ...params, texts: decodedTexts },
           env.GOOGLE_API_KEY,
@@ -706,6 +764,7 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        engine = "v2";
       }
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", question);
@@ -725,7 +784,6 @@ export default {
       let rawTranslated: string[];
       let protectionApplied: boolean;
       if (useV3) {
-        console.log("TRANSLATE_ENGINE v3 glossary=" + (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "" ? "on" : "off"));
         const result = await translateWithGoogleV3(
           { target: params.target, source: params.source ?? "en", texts },
           env,
@@ -733,8 +791,10 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        engine = "v3";
+        glossaryRequested = glossaryRequested || result.glossaryRequested;
+        glossaryUsed = glossaryUsed || result.glossaryUsed;
       } else {
-        console.log("TRANSLATE_ENGINE v2");
         const result = await translateWithGoogleV2(
           { target: params.target, source: params.source, texts },
           env.GOOGLE_API_KEY,
@@ -742,6 +802,7 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        engine = "v2";
       }
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", texts[0] ?? "");
@@ -751,9 +812,63 @@ export default {
       return { translated, protectionApplied, postProcessed, postProcessRulesApplied };
     }
 
+    // Optional per-day quota (best-effort, cache-based).
+    const charCount = decodedTexts.join("").length;
+    const limitReq = parseOptionalInt(env.TRANSLATE_DAILY_REQ_LIMIT);
+    const limitChars = parseOptionalInt(env.TRANSLATE_DAILY_CHAR_LIMIT);
+    let quotaMeta: { req: number; chars: number; limitReq: number | null; limitChars: number | null } | undefined;
+
+    if ((limitReq !== null || limitChars !== null) && "caches" in globalThis && typeof caches !== "undefined") {
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      const quotaKey = new Request(`https://bf-quota.local/bf-quota-${today}`, { method: "GET" });
+      let prevReq = 0;
+      let prevChars = 0;
+      try {
+        const cached = await caches.default.match(quotaKey);
+        if (cached) {
+          const txt = await cached.text();
+          try {
+            const parsed = JSON.parse(txt) as { req?: number; chars?: number };
+            if (typeof parsed.req === "number") prevReq = parsed.req;
+            if (typeof parsed.chars === "number") prevChars = parsed.chars;
+          } catch {
+            // ignore parse errors, treat as zero
+          }
+        }
+      } catch {
+        // ignore cache errors; quota becomes best-effort
+      }
+      const nextReq = prevReq + 1;
+      const nextChars = prevChars + charCount;
+      const wouldExceedReq = limitReq !== null && nextReq > limitReq;
+      const wouldExceedChars = limitChars !== null && nextChars > limitChars;
+      quotaMeta = { req: nextReq, chars: nextChars, limitReq, limitChars };
+      if (wouldExceedReq || wouldExceedChars) {
+        return json(
+          { error: "quota_exceeded", meta: { quota: quotaMeta } },
+          { status: 429 },
+        );
+      }
+      try {
+        await caches.default.put(
+          quotaKey,
+          new Response(JSON.stringify({ req: nextReq, chars: nextChars }), {
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      } catch {
+        // ignore cache write errors
+      }
+    }
+
     try {
       googleCalled = true;
       let run = await runTranslate(protectedFullTextIndices);
+      if (engine === "v3") {
+        console.log(
+          `ENGINE=v3 glossaryRequested=${glossaryRequested} glossaryUsed=${glossaryUsed} source=${sourceLang} target=${targetLang}`,
+        );
+      }
       let translated = run.translated;
       let protectionApplied = run.protectionApplied;
       let postProcessed = run.postProcessed;
@@ -992,6 +1107,10 @@ export default {
           rewriteApplied,
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
+          engine,
+          glossaryRequested,
+          glossaryUsed,
+          quota: quotaMeta,
         };
         const cachePayload = {
           build: CACHE_VERSION,
@@ -1047,6 +1166,10 @@ export default {
           rewriteApplied,
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
+          engine,
+          glossaryRequested,
+          glossaryUsed,
+          quota: quotaMeta,
         }),
       };
       return json(resp, { status: 200 });
