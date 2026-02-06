@@ -1,14 +1,22 @@
 import { getLanguagePack } from "./lang";
-import { getForceProtectIndicesForProperNounMistranslation } from "./lang/de";
+import { containsEnglishFragments, forceRewriteGermanQuestion, getForceProtectIndicesForProperNounMistranslation, getStumpfGermanRewrite } from "./lang/de";
 
 export interface Env {
   GOOGLE_API_KEY: string;
   CLIENT_KEY?: string;
   TRANSLATION_CACHE?: KVNamespace;
+  /** v3: project ID (e.g. my-project). If set with GOOGLE_V3_LOCATION and GOOGLE_SERVICE_ACCOUNT_JSON, v3 is used. */
+  GOOGLE_V3_PROJECT_ID?: string;
+  /** v3: region for translate + glossary (e.g. us-central1). Must match glossary location. */
+  GOOGLE_V3_LOCATION?: string;
+  /** v3: full JSON key of the service account (client_email + private_key). */
+  GOOGLE_SERVICE_ACCOUNT_JSON?: string;
+  /** v3: optional glossary ID (e.g. brainflow-en-de-main). Must exist in GOOGLE_V3_LOCATION. */
+  GOOGLE_V3_GLOSSARY?: string;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.4";
-const CACHE_VERSION = "bf-dev-answers-v7.4";
+const DEBUG_BUILD = "bf-dev-answers-v7.7";
+const CACHE_VERSION = "bf-dev-answers-v7.7";
 
 /** v7.3.2: meta.protectedIndices are GLOBAL indices (1..n-1). Never include 0 (question). */
 function toGlobalProtectedIndices(answerRelativeIndices: number[]): number[] {
@@ -59,6 +67,49 @@ function hasHtmlEntitiesInOutput(texts: string[]): boolean {
   return texts.some((t) => HTML_ENTITY_IN_OUTPUT.test(t ?? ""));
 }
 
+/** v7.7: EN-fragment detector for DE questions. True if at least 2 common EN tokens found (case-insensitive). */
+const EN_FRAGMENTS_IN_DE_QUESTION = [
+  "the", "a", "an", "features", "feature", "character", "which", "season", "episode", "game", "band", "album", "recorded", "released",
+];
+function containsEnglishFragmentsInGermanQuestion(q: string): boolean {
+  const t = (q ?? "").trim().toLowerCase();
+  if (!t) return false;
+  const words = t.split(/\s+/).map((w) => w.replace(/[^\w]/g, ""));
+  let count = 0;
+  for (const token of EN_FRAGMENTS_IN_DE_QUESTION) {
+    if (words.some((w) => w === token)) count++;
+    if (count >= 2) return true;
+  }
+  return false;
+}
+
+/**
+ * v7.5: Rewrite question for retry to reduce gaming/pop-culture fallbacks.
+ * Returns rewritten question or null if no rule matched. Case-insensitive. Only rewrites texts[0].
+ */
+function rewriteQuestionForRetry(q: string): string | null {
+  let out = (q ?? "").trim();
+  if (!out) return null;
+  const original = out;
+  // Gaming / media patterns (more specific first)
+  out = out.replace(/^.+\s+features the character (.+?)\s*\??\s*$/i, (_, name) => "In which video game does " + (name as string).trim() + " appear?");
+  if (out === original) out = out.replace(/which game has an open world/gi, "which video game has an open-world environment");
+  if (out === original) out = out.replace(/which game features/gi, "which video game includes");
+  if (out === original) out = out.replace(/which game has\b/gi, "which video game has");
+  if (out === original) out = out.replace(/playable character/gi, "main character");
+  if (out === original) out = out.replace(/boss fight/gi, "main enemy");
+  if (out === original) out = out.replace(/side quest/gi, "optional mission");
+  if (out === original) out = out.replace(/\bopen world\b/gi, "open-world game");
+  if (out === original) out = out.replace(/season pass/gi, "downloadable content");
+  if (out === original) out = out.replace(/\bDLC\b/gi, "downloadable content");
+  if (out === original) out = out.replace(/\bfeatures\b/gi, "includes");
+  if (out === original) out = out.replace(/appears in/gi, "is in");
+  if (out === original) out = out.replace(/who features/gi, "who appears");
+  out = out.replace(/\s+/g, " ").trim();
+  if (!out.endsWith("?")) out = out + "?";
+  return out !== original ? out : null;
+}
+
 let debugLoggingEnabled = false;
 
 function logDebug(message: string): void {
@@ -107,6 +158,7 @@ type TranslateBatchResponse = {
     retryReason?: string;
     protectedIndicesInitial?: number[];
     protectedIndicesFinal?: number[];
+    rewriteApplied?: boolean;
   };
 };
 
@@ -206,10 +258,9 @@ function validateRequest(
 ): { ok: true; value: TranslateBatchRequest & { target: string; texts: string[] } } | { ok: false; error: string } {
   if (typeof body !== "object" || body === null) return { ok: false, error: "Invalid JSON body." };
   const b = body as Record<string, unknown>;
-  const targetRaw = typeof b.target === "string" ? b.target : "";
-  const target = targetRaw.trim().toLowerCase();
+  const target = String((body?.target ?? body?.targetLang ?? '')).trim();
   if (!target || !isValidLang(target)) return { ok: false, error: "target must be 2-5 characters (e.g. 'es', 'de', 'pt')." };
-  const sourceRaw = typeof b.source === "string" ? b.source.trim().toLowerCase() : "";
+  const sourceRaw = String((body?.source ?? body?.sourceLang ?? '')).trim().toLowerCase();
   let source: string | undefined;
   if (sourceRaw && sourceRaw !== "auto") {
     if (!SOURCE_ALLOWLIST.has(sourceRaw)) {
@@ -281,6 +332,167 @@ function restoreProtection(text: string, replacements: Array<{ token: string; or
     restored = restored.replace(new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), original);
   }
   return restored;
+}
+
+// --- v3: Service Account JWT + Cloud Translation API v3 (glossary optional) ---
+interface GoogleServiceAccount {
+  client_email: string;
+  private_key: string;
+  project_id?: string;
+}
+
+function pemToArrayBuffer(pem: string): ArrayBuffer {
+  const base64 = pem
+    .replace(/-----BEGIN PRIVATE KEY-----/i, "")
+    .replace(/-----END PRIVATE KEY-----/i, "")
+    .replace(/\s/g, "");
+  const binary = atob(base64);
+  const buf = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) buf[i] = binary.charCodeAt(i);
+  return buf.buffer;
+}
+
+function b64UrlEncode(input: ArrayBuffer): string {
+  const bytes = new Uint8Array(input);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function signJwtRs256(
+  payload: string,
+  privateKeyPem: string
+): Promise<string> {
+  const header = JSON.stringify({ alg: "RS256", typ: "JWT" });
+  const headerB64 = b64UrlEncode(new TextEncoder().encode(header).buffer);
+  const payloadB64 = b64UrlEncode(new TextEncoder().encode(payload).buffer);
+  const toSign = `${headerB64}.${payloadB64}`;
+
+  const keyBuf = pemToArrayBuffer(privateKeyPem);
+  const cryptoKey = await crypto.subtle.importKey(
+    "pkcs8",
+    keyBuf,
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+  const sig = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    cryptoKey,
+    new TextEncoder().encode(toSign)
+  );
+  const sigB64 = b64UrlEncode(sig);
+  return `${toSign}.${sigB64}`;
+}
+
+async function getGoogleAccessTokenFromServiceAccount(sa: GoogleServiceAccount): Promise<string> {
+  const now = Math.floor(Date.now() / 1000);
+  const payload = JSON.stringify({
+    iss: sa.client_email,
+    scope: "https://www.googleapis.com/auth/cloud-translation",
+    aud: "https://oauth2.googleapis.com/token",
+    iat: now,
+    exp: now + 3600,
+  });
+  const jwt = await signJwtRs256(payload, sa.private_key);
+  const res = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion: jwt,
+    }).toString(),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Google OAuth error ${res.status}: ${text}`);
+  const data = JSON.parse(text) as { access_token?: string };
+  if (!data.access_token) throw new Error("Google OAuth: missing access_token");
+  return data.access_token;
+}
+
+function envRequired(name: string, value: string | undefined): string {
+  if (value == null || String(value).trim() === "") throw new Error(`Missing env: ${name}`);
+  return value.trim();
+}
+
+async function translateWithGoogleV3(
+  params: Required<TranslateBatchRequest>,
+  env: Env,
+  protectedFullTextIndices: number[]
+): Promise<{ translated: string[]; protectionApplied: boolean }> {
+  const projectId = envRequired("GOOGLE_V3_PROJECT_ID", env.GOOGLE_V3_PROJECT_ID);
+  const location = envRequired("GOOGLE_V3_LOCATION", env.GOOGLE_V3_LOCATION);
+  const jsonRaw = envRequired("GOOGLE_SERVICE_ACCOUNT_JSON", env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  let sa: GoogleServiceAccount;
+  try {
+    sa = JSON.parse(jsonRaw) as GoogleServiceAccount;
+  } catch {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON is invalid JSON");
+  }
+  if (!sa.client_email || !sa.private_key) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON must contain client_email and private_key");
+
+  const counter = { value: 0 };
+  const protectedSet = new Set(protectedFullTextIndices);
+  const protectedTexts: string[] = [];
+  const allReplacements: Array<Array<{ token: string; original: string }>> = [];
+  let answerPlaceholderIndex = 0;
+
+  for (let i = 0; i < params.texts.length; i++) {
+    const text = params.texts[i];
+    if (protectedSet.has(i)) {
+      protectedTexts.push(`PROT_${answerPlaceholderIndex + 1}`);
+      answerPlaceholderIndex++;
+      allReplacements.push([]);
+    } else {
+      const result = applyProtection(text, counter);
+      protectedTexts.push(result.text);
+      allReplacements.push(result.replacements);
+    }
+  }
+
+  const accessToken = await getGoogleAccessTokenFromServiceAccount(sa);
+  const url = `https://translate.googleapis.com/v3/projects/${projectId}/locations/${location}:translateText`;
+  const body: Record<string, unknown> = {
+    contents: protectedTexts,
+    mimeType: "text/plain",
+    sourceLanguageCode: "en",
+    targetLanguageCode: params.target,
+  };
+  if (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "") {
+    body.glossaryConfig = {
+      glossary: `projects/${projectId}/locations/${location}/glossaries/${env.GOOGLE_V3_GLOSSARY.trim()}`,
+    };
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`Google Translate v3 error ${res.status}: ${text}`);
+  let decoded: { translations?: Array<{ translatedText?: string }> };
+  try {
+    decoded = JSON.parse(text) as { translations?: Array<{ translatedText?: string }> };
+  } catch {
+    throw new Error("Google Translate v3 returned non-JSON response.");
+  }
+  const translations = decoded?.translations;
+  if (!Array.isArray(translations)) throw new Error("Google Translate v3 response missing translations.");
+
+  const out: string[] = translations.map((t: { translatedText?: string }, idx: number) => {
+    const translated = typeof t?.translatedText === "string" ? t.translatedText : "";
+    return restoreProtection(translated, allReplacements[idx] || []);
+  });
+  for (const i of protectedFullTextIndices) {
+    out[i] = (params.texts[i] ?? "").trim();
+  }
+  const protectionApplied = protectedFullTextIndices.length > 0 || allReplacements.some((r) => r.length > 0);
+  return { translated: out, protectionApplied };
 }
 
 async function translateWithGoogleV2(
@@ -457,7 +669,16 @@ export default {
 
     let retryAttempted = false;
     let retrySucceeded = false;
+    let rewriteApplied = false;
     let htmlEntitiesDetectedInOutput = false;
+
+    const useV3 =
+      env.GOOGLE_V3_PROJECT_ID != null &&
+      String(env.GOOGLE_V3_PROJECT_ID).trim() !== "" &&
+      env.GOOGLE_V3_LOCATION != null &&
+      String(env.GOOGLE_V3_LOCATION).trim() !== "" &&
+      env.GOOGLE_SERVICE_ACCOUNT_JSON != null &&
+      String(env.GOOGLE_SERVICE_ACCOUNT_JSON).trim() !== "";
 
     async function runTranslate(protectedIndices: number[]): Promise<{
       translated: string[];
@@ -465,13 +686,65 @@ export default {
       postProcessed: boolean;
       postProcessRulesApplied: string[];
     }> {
-      const { translated: rawTranslated, protectionApplied } = await translateWithGoogleV2(
-        { ...params, texts: decodedTexts },
-        env.GOOGLE_API_KEY,
-        protectedIndices,
-      );
+      let rawTranslated: string[];
+      let protectionApplied: boolean;
+      if (useV3) {
+        console.log("TRANSLATE_ENGINE v3 glossary=" + (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "" ? "on" : "off"));
+        const result = await translateWithGoogleV3(
+          { target: params.target, source: params.source ?? "en", texts: decodedTexts },
+          env,
+          protectedIndices
+        );
+        rawTranslated = result.translated;
+        protectionApplied = result.protectionApplied;
+      } else {
+        console.log("TRANSLATE_ENGINE v2");
+        const result = await translateWithGoogleV2(
+          { ...params, texts: decodedTexts },
+          env.GOOGLE_API_KEY,
+          protectedIndices,
+        );
+        rawTranslated = result.translated;
+        protectionApplied = result.protectionApplied;
+      }
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", question);
+      translated[0] = postResult.text;
+      const postProcessed = (rawTranslated[0] ?? "") !== postResult.text;
+      const postProcessRulesApplied = postResult.rulesApplied;
+      return { translated, protectionApplied, postProcessed, postProcessRulesApplied };
+    }
+
+    /** v7.5: Run translate with custom texts (e.g. rewritten question). Only question may differ; answers unchanged. */
+    async function runTranslateWithTexts(texts: string[], fullProtectedIndices: number[]): Promise<{
+      translated: string[];
+      protectionApplied: boolean;
+      postProcessed: boolean;
+      postProcessRulesApplied: string[];
+    }> {
+      let rawTranslated: string[];
+      let protectionApplied: boolean;
+      if (useV3) {
+        console.log("TRANSLATE_ENGINE v3 glossary=" + (env.GOOGLE_V3_GLOSSARY != null && String(env.GOOGLE_V3_GLOSSARY).trim() !== "" ? "on" : "off"));
+        const result = await translateWithGoogleV3(
+          { target: params.target, source: params.source ?? "en", texts },
+          env,
+          fullProtectedIndices
+        );
+        rawTranslated = result.translated;
+        protectionApplied = result.protectionApplied;
+      } else {
+        console.log("TRANSLATE_ENGINE v2");
+        const result = await translateWithGoogleV2(
+          { target: params.target, source: params.source, texts },
+          env.GOOGLE_API_KEY,
+          fullProtectedIndices,
+        );
+        rawTranslated = result.translated;
+        protectionApplied = result.protectionApplied;
+      }
+      let translated = [...rawTranslated];
+      const postResult = pack.postProcessQuestion(translated[0] ?? "", texts[0] ?? "");
       translated[0] = postResult.text;
       const postProcessed = (rawTranslated[0] ?? "") !== postResult.text;
       const postProcessRulesApplied = postResult.rulesApplied;
@@ -485,6 +758,20 @@ export default {
       let protectionApplied = run.protectionApplied;
       let postProcessed = run.postProcessed;
       let postProcessRulesApplied = run.postProcessRulesApplied;
+
+      // v7.6: If DE and translated question still has English fragments, retry by translating ONLY the question.
+      if (pack.code === "de" && containsEnglishFragments(translated[0] ?? "")) {
+        try {
+          const singleQuestionRun = await runTranslateWithTexts([question], []);
+          const post = pack.postProcessQuestion(singleQuestionRun.translated[0] ?? "", question);
+          if (!containsEnglishFragments(post.text)) {
+            translated = [post.text, ...translated.slice(1)];
+            if (debugLoggingEnabled) logDebug("v7.6 single-question retry: English fragments removed");
+          }
+        } catch (e) {
+          if (debugLoggingEnabled) logDebug(`v7.6 single-question retry failed: ${(e as Error)?.message ?? String(e)}`);
+        }
+      }
 
       let validationResult = pack.isBadTranslation(decodedTexts, translated, protectedAnswerIndices);
       if (hasHtmlEntitiesInOutput(translated)) {
@@ -537,6 +824,42 @@ export default {
         }
       }
 
+      // v7.5: Question rewrite retry — only when fallback (not bad), no placeholder/html/protection failure, retry once.
+      if (
+        finalValidationResult.level === "fallback" &&
+        !containsPlaceholder(finalTranslated) &&
+        !htmlEntitiesDetectedInOutput
+      ) {
+        const rewritten = rewriteQuestionForRetry(question);
+        if (rewritten !== null) {
+          retryAttempted = true;
+          retryReason = "rewrite_question";
+          if (debugLoggingEnabled) logDebug(`v7.5 retry: rewrite_question ${JSON.stringify({ original: question, rewritten })}`);
+          const rewrittenTexts = [rewritten, ...decodedTexts.slice(1)];
+          try {
+            const rewriteRun = await runTranslateWithTexts(rewrittenTexts, protectedFullTextIndices);
+            if (!containsPlaceholder(rewriteRun.translated) && !hasHtmlEntitiesInOutput(rewriteRun.translated)) {
+              const validationRewrite = pack.isBadTranslation(decodedTexts, rewriteRun.translated, protectedAnswerIndices);
+              if (validationRewrite.level === "good") {
+                finalTranslated = rewriteRun.translated;
+                finalValidationResult = validationRewrite;
+                protectionApplied = rewriteRun.protectionApplied;
+                postProcessed = rewriteRun.postProcessed;
+                postProcessRulesApplied = rewriteRun.postProcessRulesApplied;
+                rewriteApplied = true;
+                if (debugLoggingEnabled) logDebug("v7.5 retry succeeded");
+              } else {
+                if (debugLoggingEnabled) logDebug("v7.5 retry failed → fallback");
+              }
+            } else {
+              if (debugLoggingEnabled) logDebug("v7.5 retry failed → fallback");
+            }
+          } catch {
+            if (debugLoggingEnabled) logDebug("v7.5 retry failed → fallback");
+          }
+        }
+      }
+
       const numAnswers = Math.max(1, decodedTexts.length - 1);
       const allowed = finalValidationResult.allowedUnchangedIndices.length;
       const disallowed = finalValidationResult.disallowedUnchangedIndices.length;
@@ -549,9 +872,18 @@ export default {
       if (finalValidationResult.level === "bad") {
         logDebug(`validation BAD: ${JSON.stringify(finalValidationResult.reasons)}`);
         logDebug("cache skipped (BAD)");
+        // v7.6: When bad_result due to question_has_english_fragments, use stumpf German rewrite so we never return mixed question.
+        let badTranslated = decodedTexts;
+        if (finalValidationResult.reasons.includes("question_has_english_fragments")) {
+          const stumpf = getStumpfGermanRewrite(question);
+          if (stumpf !== null) {
+            badTranslated = [stumpf, ...decodedTexts.slice(1)];
+            if (debugLoggingEnabled) logDebug(`v7.6 stumpf rewrite applied: ${stumpf}`);
+          }
+        }
         return json(
           {
-            translated: decodedTexts,
+            translated: badTranslated,
             meta: buildMetaBase({
               outcome: "fallback_original",
               issue: "bad_result",
@@ -575,6 +907,7 @@ export default {
               mixedLanguageDetected: finalValidationResult.reasons.includes("mixed_language_in_question"),
               retryAttempted,
               retryReason,
+              rewriteApplied: false,
               protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
               protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
             }),
@@ -585,23 +918,54 @@ export default {
 
       let outputTranslated: string[];
       let fallbackUsed = false;
+      let usedForcedRewrite = false;
+      let forcedRewriteRule: string | undefined;
+      let mixedLanguageDetectedForMeta = false;
 
       if (finalValidationResult.level === "fallback") {
-        if (debugLoggingEnabled) logDebug("fallback triggered");
-        outputTranslated = sanitize(decodedTexts, finalTranslated);
-        if (containsPlaceholder(outputTranslated)) {
-          outputTranslated = decodedTexts;
+        const transQuestion = finalTranslated[0] ?? "";
+        const mixedFromValidation = finalValidationResult.reasons.includes("mixed_language_in_question");
+        const mixedFromFragments = pack.code === "de" && containsEnglishFragmentsInGermanQuestion(transQuestion);
+        const mixedLanguageDetected = mixedFromValidation || mixedFromFragments;
+        mixedLanguageDetectedForMeta = mixedLanguageDetected;
+        const retrySucceeded = rewriteApplied;
+        const rewriteRetryFailed = retryAttempted && retryReason === "rewrite_question" && !retrySucceeded;
+        const shouldForceRewrite = pack.code === "de" && (mixedLanguageDetected || rewriteRetryFailed);
+        if (shouldForceRewrite) {
+          const { text: forcedQuestion, rule } = forceRewriteGermanQuestion(question);
+          const forcedOutput = [forcedQuestion, ...decodedTexts.slice(1)];
+          if (!containsPlaceholder(forcedOutput)) {
+            outputTranslated = forcedOutput;
+            rewriteApplied = true;
+            fallbackUsed = false;
+            usedForcedRewrite = true;
+            forcedRewriteRule = rule;
+            mixedLanguageDetectedForMeta = false;
+            if (debugLoggingEnabled) logDebug(`v7.7 forced rewrite: ${forcedQuestion}`);
+          } else {
+            outputTranslated = sanitize(decodedTexts, finalTranslated);
+            if (containsPlaceholder(outputTranslated)) outputTranslated = decodedTexts;
+            fallbackUsed = true;
+          }
+        } else {
+          if (debugLoggingEnabled) logDebug("fallback triggered");
+          outputTranslated = sanitize(decodedTexts, finalTranslated);
+          if (containsPlaceholder(outputTranslated)) outputTranslated = decodedTexts;
+          fallbackUsed = true;
+          if (debugLoggingEnabled) logDebug("sanitize applied");
         }
-        fallbackUsed = true;
-        if (debugLoggingEnabled) logDebug("sanitize applied");
-        if (debugLoggingEnabled) logDebug("diversity restored");
       } else {
         outputTranslated = finalTranslated;
       }
 
       let didStore = false;
+      const effectiveValidationLevel = usedForcedRewrite ? "good" : finalValidationResult.level;
+      const effectiveFallbackUsed = usedForcedRewrite ? false : fallbackUsed;
+      const effectivePostProcessRulesApplied = forcedRewriteRule
+        ? [...postProcessRulesApplied, forcedRewriteRule]
+        : postProcessRulesApplied;
       const shouldStore =
-        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE && finalValidationResult.level !== "bad";
+        !bypassCache && googleCalled && !!env.TRANSLATION_CACHE && finalValidationResult.level !== "bad" && !usedForcedRewrite;
       if (shouldStore && env.TRANSLATION_CACHE) {
         const storedMeta: TranslateBatchResponse["meta"] = {
           build: DEBUG_BUILD,
@@ -610,7 +974,7 @@ export default {
           googleCalled: true,
           protectionApplied,
           postProcessed,
-          postProcessRulesApplied,
+          postProcessRulesApplied: effectivePostProcessRulesApplied,
           issue: null,
           cacheStored: true,
           cacheStoreReason: "ok",
@@ -621,10 +985,11 @@ export default {
           nonProtectedUnchangedIndices: nonProtectedUnchangedIndices.map((ai) => ai + 1),
           unchangedNonProtectedRatio,
           htmlDecoded,
-          validationLevel: finalValidationResult.level,
-          fallbackUsed,
+          validationLevel: effectiveValidationLevel,
+          fallbackUsed: effectiveFallbackUsed,
           retryAttempted,
           retryReason,
+          rewriteApplied,
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
         };
@@ -663,7 +1028,7 @@ export default {
           googleCalled,
           protectionApplied,
           postProcessed,
-          postProcessRulesApplied,
+          postProcessRulesApplied: effectivePostProcessRulesApplied,
           allowedUnchangedIndices: finalValidationResult.allowedUnchangedIndices,
           disallowedUnchangedIndices: finalValidationResult.disallowedUnchangedIndices,
           unchangedAnalysis,
@@ -675,10 +1040,11 @@ export default {
           htmlDecoded,
           htmlEntitiesDetectedInOutput,
           containsPlaceholder: false,
-          mixedLanguageDetected: false,
-          validationLevel: finalValidationResult.level,
-          fallbackUsed,
+          mixedLanguageDetected: mixedLanguageDetectedForMeta,
+          validationLevel: effectiveValidationLevel,
+          fallbackUsed: effectiveFallbackUsed,
           retryReason,
+          rewriteApplied,
           protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
           protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
         }),

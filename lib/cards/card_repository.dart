@@ -75,25 +75,60 @@ class CardRepository {
   /// No-op: seed/demo cards disabled; only importer fills DB.
   Future<void> ensureSeed() async {}
 
-  /// Resolves a card for a specific locale
-  /// Returns a new CardModel with question/answers/correctAnswer from translation if available
+  /// Resolves a card for a specific locale.
+  /// Translations are applied atomically: only if question AND all answers are present and complete.
+  /// Otherwise the original card is returned unchanged to avoid mixed-language UI.
   CardModel resolveForLocale(CardModel raw, String localeCode) {
     // Normalize locale code (e.g., 'en_US' -> 'en')
     final targetLang = localeCode.split('_').first.toLowerCase().trim();
 
     final baseEntry = raw.languageMap[raw.sourceLanguage];
     final targetEntry = (targetLang.isNotEmpty) ? raw.languageMap[targetLang] : null;
-    final resolved = targetEntry ?? baseEntry;
-    if (resolved == null) return raw;
+    // No translation or no base entry – fall back to original card.
+    if (baseEntry == null || targetEntry == null || targetLang == raw.sourceLanguage) {
+      final resolved = baseEntry ?? targetEntry;
+      if (resolved == null) return raw;
+      final idx = resolved.correctIndex;
+      final correctAnswer =
+          (idx >= 0 && idx < resolved.answers.length) ? resolved.answers[idx] : raw.correctAnswer;
+      return CardModel(
+        id: raw.id,
+        question: resolved.question,
+        answers: resolved.answers,
+        correctAnswer: correctAnswer,
+        sourceLanguage: raw.sourceLanguage,
+        languageMap: raw.languageMap,
+        category: raw.category,
+        difficulty: raw.difficulty,
+        createdAt: raw.createdAt,
+        source: raw.source,
+      );
+    }
 
-    final idx = resolved.correctIndex;
+    // Atomic translation check: require complete question + answers before using targetEntry.
+    final translatedQuestion = targetEntry.question;
+    final translatedAnswers = targetEntry.answers;
+    final baseAnswers = baseEntry.answers;
+    final hasQuestion = translatedQuestion.trim().isNotEmpty;
+    final hasAnswers = translatedAnswers.isNotEmpty &&
+        translatedAnswers.length == baseAnswers.length &&
+        translatedAnswers.every((a) => a.trim().isNotEmpty);
+
+    if (!hasQuestion || !hasAnswers) {
+      debugPrint(
+        'RESOLVE_LOCALE_INCOMPLETE id=${raw.id} lang=$targetLang q=$hasQuestion a=$hasAnswers',
+      );
+      return raw;
+    }
+
+    final idx = targetEntry.correctIndex;
     final correctAnswer =
-        (idx >= 0 && idx < resolved.answers.length) ? resolved.answers[idx] : raw.correctAnswer;
+        (idx >= 0 && idx < translatedAnswers.length) ? translatedAnswers[idx] : raw.correctAnswer;
 
     return CardModel(
       id: raw.id,
-      question: resolved.question,
-      answers: resolved.answers,
+      question: translatedQuestion,
+      answers: translatedAnswers,
       correctAnswer: correctAnswer,
       sourceLanguage: raw.sourceLanguage,
       languageMap: raw.languageMap,
@@ -258,65 +293,86 @@ class CardRepository {
   /// Target total cards after pipeline (when adding EN supplement).
   static const int kTargetTotal = 1000;
 
-  /// Translates EN cards to de + es via worker. Keeps only cards with BOTH de & es.
-  /// Returns cards + failedCount/attemptedCount for bootstrap fail-ratio check.
+  /// Translates EN cards to de + es via worker. Never drops cards: keeps card (at least EN),
+  /// only skips writing target lang into languageMap when translation is "bad".
+  /// Return always has same number of cards as input (enCards with sourceLanguage==en).
   Future<TranslateEnCardsResult> translateEnCardsStrict(List<CardModel> enCards) async {
-    if (enCards.isEmpty) {
+    final enOnly = enCards.where((c) => c.sourceLanguage == 'en').toList();
+    if (enOnly.isEmpty) {
       return TranslateEnCardsResult(cards: <CardModel>[], failedCount: 0, attemptedCount: 0);
     }
     final client = createTranslationClient();
     final result = <CardModel>[];
     var translatedDe = 0;
     var translatedEs = 0;
+    var fallbackDe = 0;
+    var fallbackEs = 0;
     var failCount = 0;
-    var attemptedCount = 0;
 
-    for (final card in enCards) {
-      if (card.sourceLanguage != 'en') continue;
+    for (final card in enOnly) {
       final sourceEntry = card.languageMap['en'];
       if (sourceEntry == null) {
-        failCount++;
-        attemptedCount++;
-        continue;
-      }
-      attemptedCount++;
-      final hasDe = card.languageMap.containsKey('de');
-      final hasEs = card.languageMap.containsKey('es');
-      if (hasDe && hasEs) {
         result.add(card);
         continue;
       }
-      final texts = <String>[sourceEntry.question, ...sourceEntry.answers];
+      final hasDe = card.languageMap.containsKey('de');
+      final hasEs = card.languageMap.containsKey('es');
       var updated = card;
-      try {
-        if (!hasDe) {
+
+      if (!hasDe) {
+        try {
+          final texts = <String>[sourceEntry.question, ...sourceEntry.answers];
           final translated = await client.translateBatch(
             texts: texts,
             targetLang: 'de',
             sourceLang: 'en',
           );
-          if (translated.length != texts.length) throw FormatException('length');
-          final entry = CardText(
-            question: translated[0],
-            answers: translated.sublist(1),
-            correctIndex: sourceEntry.correctIndex,
-            version: 1,
-          );
-          updated = CardModel(
-            id: updated.id,
-            question: updated.question,
-            answers: updated.answers,
-            correctAnswer: updated.correctAnswer,
-            sourceLanguage: updated.sourceLanguage,
-            languageMap: <String, CardText>{...updated.languageMap, 'de': entry},
-            category: updated.category,
-            difficulty: updated.difficulty,
-            createdAt: updated.createdAt,
-            source: updated.source,
-          );
-          translatedDe++;
+          final badLength = translated.length != texts.length;
+          final unchangedQuestion = translated.isNotEmpty &&
+              translated[0].trim().toLowerCase() == sourceEntry.question.trim().toLowerCase();
+          var allAnswersUnchanged = false;
+          if (!badLength && translated.length == texts.length && translated.length > 1) {
+            allAnswersUnchanged = true;
+            for (var i = 0; i < sourceEntry.answers.length; i++) {
+              final orig = sourceEntry.answers[i].trim().toLowerCase();
+              final tr = translated[i + 1].trim().toLowerCase();
+              if (orig != tr) {
+                allAnswersUnchanged = false;
+                break;
+              }
+            }
+          }
+          if (badLength || (unchangedQuestion && allAnswersUnchanged)) {
+            fallbackDe++;
+          } else {
+            final entry = CardText(
+              question: translated[0],
+              answers: translated.sublist(1),
+              correctIndex: sourceEntry.correctIndex,
+              version: 1,
+            );
+            updated = CardModel(
+              id: updated.id,
+              question: updated.question,
+              answers: updated.answers,
+              correctAnswer: updated.correctAnswer,
+              sourceLanguage: updated.sourceLanguage,
+              languageMap: <String, CardText>{...updated.languageMap, 'de': entry},
+              category: updated.category,
+              difficulty: updated.difficulty,
+              createdAt: updated.createdAt,
+              source: updated.source,
+            );
+            translatedDe++;
+          }
+        } catch (e) {
+          failCount++;
+          debugPrint('IMPORT_TRANSLATION_FAIL card=${card.id} error=$e');
         }
-        if (!updated.languageMap.containsKey('es')) {
+      }
+
+      if (!updated.languageMap.containsKey('es')) {
+        try {
           final sourceForEs = updated.languageMap['en']!;
           final textsEs = [sourceForEs.question, ...sourceForEs.answers];
           final translated = await client.translateBatch(
@@ -324,41 +380,62 @@ class CardRepository {
             targetLang: 'es',
             sourceLang: 'en',
           );
-          if (translated.length != textsEs.length) throw FormatException('length');
-          final entry = CardText(
-            question: translated[0],
-            answers: translated.sublist(1),
-            correctIndex: sourceForEs.correctIndex,
-            version: 1,
-          );
-          updated = CardModel(
-            id: updated.id,
-            question: updated.question,
-            answers: updated.answers,
-            correctAnswer: updated.correctAnswer,
-            sourceLanguage: updated.sourceLanguage,
-            languageMap: <String, CardText>{...updated.languageMap, 'es': entry},
-            category: updated.category,
-            difficulty: updated.difficulty,
-            createdAt: updated.createdAt,
-            source: updated.source,
-          );
-          translatedEs++;
+          final badLength = translated.length != textsEs.length;
+          final unchangedQuestion = translated.isNotEmpty &&
+              translated[0].trim().toLowerCase() == sourceForEs.question.trim().toLowerCase();
+          var allAnswersUnchanged = false;
+          if (!badLength && translated.length == textsEs.length && translated.length > 1) {
+            allAnswersUnchanged = true;
+            for (var i = 0; i < sourceForEs.answers.length; i++) {
+              final orig = sourceForEs.answers[i].trim().toLowerCase();
+              final tr = translated[i + 1].trim().toLowerCase();
+              if (orig != tr) {
+                allAnswersUnchanged = false;
+                break;
+              }
+            }
+          }
+          if (badLength || (unchangedQuestion && allAnswersUnchanged)) {
+            fallbackEs++;
+          } else {
+            final entry = CardText(
+              question: translated[0],
+              answers: translated.sublist(1),
+              correctIndex: sourceForEs.correctIndex,
+              version: 1,
+            );
+            updated = CardModel(
+              id: updated.id,
+              question: updated.question,
+              answers: updated.answers,
+              correctAnswer: updated.correctAnswer,
+              sourceLanguage: updated.sourceLanguage,
+              languageMap: <String, CardText>{...updated.languageMap, 'es': entry},
+              category: updated.category,
+              difficulty: updated.difficulty,
+              createdAt: updated.createdAt,
+              source: updated.source,
+            );
+            translatedEs++;
+          }
+        } catch (e) {
+          failCount++;
+          debugPrint('IMPORT_TRANSLATION_FAIL card=${card.id} error=$e');
         }
-        result.add(updated);
-      } catch (e) {
-        failCount++;
-        debugPrint('IMPORT_TRANSLATION_FAIL card=${card.id} error=$e');
       }
+
+      result.add(updated);
     }
 
     if (translatedDe > 0) debugPrint('IMPORT_TRANSLATION_OK lang=de count=$translatedDe');
     if (translatedEs > 0) debugPrint('IMPORT_TRANSLATION_OK lang=es count=$translatedEs');
+    if (fallbackDe > 0) debugPrint('IMPORT_TRANSLATION_FALLBACK lang=de count=$fallbackDe reason=unchanged_question');
+    if (fallbackEs > 0) debugPrint('IMPORT_TRANSLATION_FALLBACK lang=es count=$fallbackEs reason=unchanged_question');
     if (failCount > 0) debugPrint('IMPORT_TRANSLATION_FAIL count=$failCount');
     return TranslateEnCardsResult(
       cards: result,
       failedCount: failCount,
-      attemptedCount: attemptedCount,
+      attemptedCount: enOnly.length,
     );
   }
 
