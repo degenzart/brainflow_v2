@@ -134,10 +134,11 @@ class CardRepository {
 
     final baseEntry = raw.languageMap[raw.sourceLanguage];
     final targetEntry = (targetLang.isNotEmpty) ? raw.languageMap[targetLang] : null;
-    // No translation or no base entry – fall back to original card (or null if strict and no base).
-    if (baseEntry == null || targetEntry == null || targetLang == raw.sourceLanguage) {
+
+    // Same language as source: use base/target (identical).
+    if (targetLang == raw.sourceLanguage) {
       final resolved = baseEntry ?? targetEntry;
-      if (resolved == null) return wantsStrict ? null : raw;
+      if (resolved == null) return raw;
       final idx = resolved.correctIndex;
       final correctAnswer =
           (idx >= 0 && idx < resolved.answers.length) ? resolved.answers[idx] : raw.correctAnswer;
@@ -155,60 +156,22 @@ class CardRepository {
       );
     }
 
-    // Atomic translation check: require complete question + answers before using targetEntry.
-    final translatedQuestion = targetEntry.question;
-    final translatedAnswers = targetEntry.answers;
-    final baseAnswers = baseEntry.answers;
-    final hasQuestion = translatedQuestion.trim().isNotEmpty;
-    final hasAnswers = translatedAnswers.isNotEmpty &&
-        translatedAnswers.length == baseAnswers.length &&
-        translatedAnswers.every((a) => a.trim().isNotEmpty);
-
-    final sameQuestion = _norm(translatedQuestion) == _norm(baseEntry.question);
-    var unchangedAnswersCount = 0;
-    for (var i = 0; i < baseAnswers.length && i < translatedAnswers.length; i++) {
-      if (_norm(translatedAnswers[i]) == _norm(baseAnswers[i])) unchangedAnswersCount++;
-    }
-    final allAnswersUnchanged = unchangedAnswersCount == baseAnswers.length;
-    final placeholderQ = _isGenericPlaceholderQuestion(translatedQuestion);
-
-    final useTarget = hasQuestion &&
-        hasAnswers &&
-        !placeholderQ &&
-        !(sameQuestion && allAnswersUnchanged);
-
-    // For DE/ES etc.: only show card if translation is clean (no EN remnants). Otherwise skip.
-    final questionLooksEnglish = _looksEnglish(translatedQuestion);
-    final anyAnswerLooksEnglish = translatedAnswers.any((a) => _looksEnglish(a));
-    final useTargetStrict = useTarget && !questionLooksEnglish && !anyAnswerLooksEnglish;
-
-    if (wantsStrict && !useTargetStrict) {
-      debugPrint(
-        'RESOLVE_LOCALE_SKIP id=${raw.id} lang=$targetLang placeholderQ=$placeholderQ qEnglish=$questionLooksEnglish answerEnglish=$anyAnswerLooksEnglish',
-      );
-      return null;
-    }
-
-    if (!useTarget) {
-      if (!hasQuestion || !hasAnswers) {
-        debugPrint(
-          'RESOLVE_LOCALE_INCOMPLETE id=${raw.id} lang=$targetLang q=$hasQuestion a=$hasAnswers',
-        );
-      } else {
-        debugPrint(
-          'RESOLVE_LOCALE_REJECT id=${raw.id} lang=$targetLang placeholderQ=$placeholderQ sameQ=$sameQuestion allUnchanged=$allAnswersUnchanged',
-        );
-      }
-      if (wantsStrict) return null;
-      // Fall back to base entry entirely to avoid mixed-language cards (EN locale only).
-      final idx = baseEntry.correctIndex;
-      final correctAnswer = (idx >= 0 && idx < baseEntry.answers.length)
-          ? baseEntry.answers[idx]
+    // Strict (DE/ES etc.): only targetEntry, never fall back to EN. Skip if target missing or incomplete.
+    if (wantsStrict) {
+      if (targetEntry == null) return null;
+      if (targetEntry.question.trim().isEmpty) return null;
+      if (_isGenericPlaceholderQuestion(targetEntry.question)) return null;
+      if (_looksEnglish(targetEntry.question)) return null;
+      if (targetEntry.answers.length < 2) return null;
+      if (targetEntry.answers.any((a) => a.trim().isEmpty)) return null;
+      final idx = targetEntry.correctIndex;
+      final correctAnswer = (idx >= 0 && idx < targetEntry.answers.length)
+          ? targetEntry.answers[idx]
           : raw.correctAnswer;
       return CardModel(
         id: raw.id,
-        question: baseEntry.question,
-        answers: baseEntry.answers,
+        question: targetEntry.question,
+        answers: targetEntry.answers,
         correctAnswer: correctAnswer,
         sourceLanguage: raw.sourceLanguage,
         languageMap: raw.languageMap,
@@ -219,14 +182,16 @@ class CardRepository {
       );
     }
 
-    final idx = targetEntry.correctIndex;
+    // Not strict (e.g. EN): use base or target.
+    final resolved = baseEntry ?? targetEntry;
+    if (resolved == null) return raw;
+    final idx = resolved.correctIndex;
     final correctAnswer =
-        (idx >= 0 && idx < translatedAnswers.length) ? translatedAnswers[idx] : raw.correctAnswer;
-
+        (idx >= 0 && idx < resolved.answers.length) ? resolved.answers[idx] : raw.correctAnswer;
     return CardModel(
       id: raw.id,
-      question: translatedQuestion,
-      answers: translatedAnswers,
+      question: resolved.question,
+      answers: resolved.answers,
       correctAnswer: correctAnswer,
       sourceLanguage: raw.sourceLanguage,
       languageMap: raw.languageMap,

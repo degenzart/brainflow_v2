@@ -570,9 +570,9 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             )
                           : _FlowView(
-                              cards: _getDisplayedCards(),
-                              onToggleOriginal: () => setState(() => _showOriginalText = !_showOriginalText),
+                              cardPairs: _cardPairs,
                               showOriginalText: _showOriginalText,
+                              onToggleOriginal: () => setState(() => _showOriginalText = !_showOriginalText),
                               onReport: _openReportSheet,
                               hapticsEnabled: _hapticsEnabled,
                               onConsumed: (currentIndex, total) {
@@ -1250,26 +1250,30 @@ class _SettingsScreen extends StatelessWidget {
 
 class _FlowView extends StatefulWidget {
   const _FlowView({
-    required this.cards,
+    required this.cardPairs,
     required this.onReport,
     required this.hapticsEnabled,
     this.onConsumed,
-    this.onToggleOriginal,
     this.showOriginalText = false,
+    this.onToggleOriginal,
   });
 
-  final List<CardModel> cards;
+  final List<_FlowCardItem> cardPairs;
   final Future<void> Function(CardModel card) onReport;
   final bool hapticsEnabled;
   final void Function(int currentIndex, int total)? onConsumed;
-  final VoidCallback? onToggleOriginal;
   final bool showOriginalText;
+  final VoidCallback? onToggleOriginal;
 
   @override
   State<_FlowView> createState() => _FlowViewState();
 }
 
 class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
+  List<CardModel> get _displayedCards => widget.showOriginalText
+      ? widget.cardPairs.map((e) => e.original).toList()
+      : widget.cardPairs.map((e) => e.localized).toList();
+
   late final PageController _controller;
   late final AnimationController _cardScaleController;
   late final Animation<double> _cardScaleAnimation;
@@ -1397,7 +1401,7 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
 
   Future<void> _goNext({int millis = 420}) async {
     if (!_controller.hasClients) return;
-    if (widget.cards.isEmpty) return;
+    if (_displayedCards.isEmpty) return;
 
     // Endless flow: always go to next page (PageView handles wrap-around via itemCount)
     await _controller.nextPage(
@@ -1410,7 +1414,7 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
     if (!_controller.hasClients) return;
     final current = (_controller.page ?? _controller.initialPage.toDouble())
         .round()
-        .clamp(0, widget.cards.length - 1);
+        .clamp(0, _displayedCards.length - 1);
     if (current <= 0) return;
 
     await _controller.previousPage(
@@ -1472,13 +1476,13 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
 
   @override
   Widget build(BuildContext context) {
-    if (widget.cards.isEmpty) {
+    if (_displayedCards.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
 
     // Use very large itemCount for endless flow
     const maxItemCount = 10000;
-    final itemCount = math.min(widget.cards.length * 100, maxItemCount);
+    final itemCount = math.min(_displayedCards.length * 100, maxItemCount);
 
     return PageView.builder(
       controller: _controller,
@@ -1486,8 +1490,8 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
       itemCount: itemCount,
       onPageChanged: (i) {
         // Handle endless flow: wrap around using modulo
-        final actualIndex = i % widget.cards.length;
-        final currentCard = widget.cards[actualIndex];
+        final actualIndex = i % _displayedCards.length;
+        final currentCard = _displayedCards[actualIndex];
         final currentCardId = currentCard.id;
 
         // Trigger scale-in animation if card ID changed
@@ -1507,13 +1511,15 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
           _isCorrectlyAnswered = false;
         });
 
-        widget.onConsumed?.call(actualIndex, widget.cards.length);
+        widget.onConsumed?.call(actualIndex, _displayedCards.length);
       },
       itemBuilder: (context, index) {
         // Wrap around to actual card index
-        final cardIndex = index % widget.cards.length;
-        final card = widget.cards[cardIndex];
-        final style = _categoryStyle(card.category);
+        final cardIndex = index % _displayedCards.length;
+        final display = _displayedCards[cardIndex];
+        final pair = widget.cardPairs[cardIndex];
+        final canShowToggle = pair.localized.answers.length == pair.original.answers.length;
+        final style = _categoryStyle(display.category);
         final isActive = cardIndex == _currentIndex;
         final showWrongFlash = isActive && _feedback == _FlowFeedback.wrong;
 
@@ -1601,17 +1607,17 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           _FlowTopRow(
-                            card: card,
-                            onReport: () => widget.onReport(card),
+                            card: display,
+                            onReport: () => widget.onReport(display),
                           ),
                           const SizedBox(height: 12),
                           Expanded(
                             child: _FlowCard(
-                              card: card,
+                              display: display,
                               style: style,
                               locked: _answerLocked && isActive,
                               onAnswer: (a, context) => _handleAnswer(
-                                card,
+                                display,
                                 a,
                                 context,
                                 cardStackKey,
@@ -1621,7 +1627,7 @@ class _FlowViewState extends State<_FlowView> with TickerProviderStateMixin {
                                   isActive ? _selectedAnswer : null,
                               isCorrectlyAnswered:
                                   isActive ? _isCorrectlyAnswered : false,
-                              onToggleOriginal: widget.onToggleOriginal,
+                              onToggleOriginal: canShowToggle ? widget.onToggleOriginal : null,
                               showOriginalText: widget.showOriginalText,
                             ),
                           ),
@@ -1736,7 +1742,7 @@ class _FlowTopRow extends StatelessWidget {
 
 class _FlowCard extends StatelessWidget {
   const _FlowCard({
-    required this.card,
+    required this.display,
     required this.style,
     required this.onAnswer,
     required this.locked,
@@ -1746,7 +1752,8 @@ class _FlowCard extends StatelessWidget {
     this.onToggleOriginal,
     this.showOriginalText = false,
   });
-  final CardModel card;
+  /// Single source: question + answers + correctAnswer always from this card (never mixed).
+  final CardModel display;
   final _CategoryStyle style;
   final void Function(String, BuildContext?) onAnswer;
   final bool locked;
@@ -1832,7 +1839,7 @@ class _FlowCard extends StatelessWidget {
                       ),
                       child: Center(
                         child: _AutoFitText(
-                          text: card.question,
+                          text: display.question,
                           textAlign: TextAlign.center,
                           maxLines: 5,
                           minFontSize: 10.0,
@@ -1881,12 +1888,12 @@ class _FlowCard extends StatelessWidget {
                   child: Align(
                     alignment: Alignment.bottomCenter,
                     child: _AnswerGrid(
-                      answers: card.answers.take(4).toList(growable: false),
+                      answers: display.answers.take(4).toList(growable: false),
                       correctIndex: () {
                         final visibleAnswers =
-                            card.answers.take(4).toList(growable: false);
+                            display.answers.take(4).toList(growable: false);
                         final idx =
-                            visibleAnswers.indexOf(card.correctAnswer);
+                            visibleAnswers.indexOf(display.correctAnswer);
                         return idx >= 0 ? idx : 0;
                       }(),
                       locked: locked,
