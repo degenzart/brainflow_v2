@@ -1,3 +1,6 @@
+# GCP / secrets (glossary deploy script)
+.secrets/
+
 # Cloudflare Wrangler / Miniflare
 translation-worker/.wrangler/
 translation-worker/.dev.vars

@@ -65,11 +65,13 @@ function isCommonGermanNounTranslation(translated: string): boolean {
   return COMMON_GERMAN_NOUNS.has(normalize(token)) || (token.length <= 5 && /^[a-zäöüß]+$/.test(token));
 }
 
-/** v7.3.1: Returns 0-based answer indices to force-protect on retry (proper noun mistranslated to common DE noun). */
+/** v7.3.1: Returns 0-based answer indices to force-protect on retry (proper noun mistranslated to common DE noun).
+ * When glossaryUsed is true, indices where Google returned a different translation are skipped (glossary overrides protection). */
 export function getForceProtectIndicesForProperNounMistranslation(
   originalTexts: string[],
   translatedTexts: string[],
-  protectedAnswerIndices: number[]
+  protectedAnswerIndices: number[],
+  glossaryUsed?: boolean
 ): number[] {
   const orig = originalTexts ?? [];
   const trans = translatedTexts ?? [];
@@ -81,6 +83,7 @@ export function getForceProtectIndicesForProperNounMistranslation(
     const o = (orig[answerStartIdx + ai] ?? "").trim();
     const t = (trans[answerStartIdx + ai] ?? "").trim();
     if (!o || !t) continue;
+    if (glossaryUsed && o !== t) continue; // Glossary has priority: accept translation, do not force-protect
     if (!looksLikeProperNoun(o)) continue;
     if (normalize(o) === normalize(t)) continue;
     if (isCommonGermanNounTranslation(t)) force.push(ai);

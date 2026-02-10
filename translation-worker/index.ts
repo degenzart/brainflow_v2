@@ -21,8 +21,8 @@ export interface Env {
   TRANSLATE_ENGINE?: string;
 }
 
-const DEBUG_BUILD = "bf-dev-answers-v7.7";
-const CACHE_VERSION = "bf-dev-answers-v7.7";
+const DEBUG_BUILD = "bf-dev-answers-v7.8";
+const CACHE_VERSION = "bf-dev-answers-v7.8";
 
 /** v7.3.2: meta.protectedIndices are GLOBAL indices (1..n-1). Never include 0 (question). */
 function toGlobalProtectedIndices(answerRelativeIndices: number[]): number[] {
@@ -173,6 +173,10 @@ type TranslateBatchResponse = {
     glossaryRequested?: boolean;
     /** v3: whether glossary translations were actually used by Google. */
     glossaryUsed?: boolean;
+    /** Local EN→DE glossary fallback was applied for unchanged segments. */
+    localGlossaryApplied?: boolean;
+    /** Indices (0-based) where local glossary replacement was applied. */
+    localGlossaryAppliedIndices?: number[];
     /** Optional per-day quota info when limits are configured. */
     quota?: {
       req: number;
@@ -370,6 +374,30 @@ function restoreProtection(text: string, replacements: Array<{ token: string; or
   return restored;
 }
 
+/** Strip BFID suffix from end of text so glossary can match; suffix is re-appended after translation. */
+function stripBFID(text: string): { clean: string; suffix: string } {
+  const m = (text ?? "").match(/^(.+?)(\s*BFID:\d+)\s*$/);
+  if (m) return { clean: m[1].trimEnd(), suffix: m[2] };
+  return { clean: (text ?? "").trim(), suffix: "" };
+}
+
+/** Local EN→DE glossary fallback when Google returns unchanged; key = normalized EN, value = DE. */
+const LOCAL_GLOSSARY_EN_DE: Record<string, string> = {
+  "delivery driver": "Lieferfahrer",
+  "taxi driver": "Taxifahrer",
+  "square inches": "Quadratzoll",
+  god: "Gott",
+};
+
+function normKey(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function applyLocalGlossaryFallbackOne(s: string): string | null {
+  const key = normKey(s);
+  return key ? (LOCAL_GLOSSARY_EN_DE[key] ?? null) : null;
+}
+
 // --- v3: Service Account JWT + Cloud Translation API v3 (glossary optional) ---
 interface GoogleServiceAccount {
   client_email: string;
@@ -456,7 +484,13 @@ async function translateWithGoogleV3(
   params: Required<TranslateBatchRequest>,
   env: Env,
   protectedFullTextIndices: number[]
-): Promise<{ translated: string[]; protectionApplied: boolean; glossaryRequested: boolean; glossaryUsed: boolean }> {
+): Promise<{
+  translated: string[];
+  protectionApplied: boolean;
+  glossaryRequested: boolean;
+  glossaryUsed: boolean;
+  glossaryFallbackUsed?: boolean;
+}> {
   const projectId = envRequired("GOOGLE_V3_PROJECT_ID", env.GOOGLE_V3_PROJECT_ID);
   const location = envRequired("GOOGLE_V3_LOCATION", env.GOOGLE_V3_LOCATION);
   const jsonRaw = envRequired("GOOGLE_SERVICE_ACCOUNT_JSON", env.GOOGLE_SERVICE_ACCOUNT_JSON);
@@ -468,20 +502,25 @@ async function translateWithGoogleV3(
   }
   if (!sa.client_email || !sa.private_key) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON must contain client_email and private_key");
 
+  const debug95021 = params.texts.some((t) => String(t).includes("BFID:95021"));
+
   const counter = { value: 0 };
   const protectedSet = new Set(protectedFullTextIndices);
   const protectedTexts: string[] = [];
   const allReplacements: Array<Array<{ token: string; original: string }>> = [];
+  const bfidSuffixes: string[] = [];
   let answerPlaceholderIndex = 0;
 
   for (let i = 0; i < params.texts.length; i++) {
-    const text = params.texts[i];
+    const raw = params.texts[i] ?? "";
+    const { clean, suffix } = stripBFID(raw);
+    bfidSuffixes.push(suffix);
     if (protectedSet.has(i)) {
       protectedTexts.push(`PROT_${answerPlaceholderIndex + 1}`);
       answerPlaceholderIndex++;
       allReplacements.push([]);
     } else {
-      const result = applyProtection(text, counter);
+      const result = applyProtection(clean, counter);
       protectedTexts.push(result.text);
       allReplacements.push(result.replacements);
     }
@@ -491,7 +530,8 @@ async function translateWithGoogleV3(
   const url = `https://translate.googleapis.com/v3/projects/${projectId}/locations/${location}:translateText`;
   const sourceLanguageCode = String(params.source ?? "en").trim().toLowerCase();
   const targetLanguageCode = String(params.target ?? "").trim().toLowerCase();
-  const glossary = String(env.GOOGLE_V3_GLOSSARY ?? "").trim();
+  // Glossary name from env (GOOGLE_V3_GLOSSARY).
+  const glossaryName = String(env.GOOGLE_V3_GLOSSARY ?? "").trim();
 
   const body: Record<string, unknown> = {
     contents: protectedTexts,
@@ -500,14 +540,28 @@ async function translateWithGoogleV3(
     targetLanguageCode,
   };
 
+  // Hard rule: for v3 EN→DE, always attach glossary when env is set. No heuristics; protection/validation run after the response.
   const glossaryRequested =
-    glossary.length > 0 && sourceLanguageCode === "en" && targetLanguageCode === "de";
-
+    glossaryName.length > 0 && sourceLanguageCode === "en" && targetLanguageCode === "de";
   if (glossaryRequested) {
-    body.glossaryConfig = { glossary: `projects/${projectId}/locations/${location}/glossaries/${glossary}` };
+    body.glossaryConfig = {
+      glossary: `projects/${projectId}/locations/${location}/glossaries/${glossaryName}`,
+    };
   }
 
-  const res = await fetch(url, {
+  if (debug95021) {
+    const engineRequested = (String(env.TRANSLATE_ENGINE ?? "").trim() || "auto").toLowerCase();
+    console.log("BFID95021 v3 request", {
+      sourceLanguageCode,
+      targetLanguageCode,
+      engineRequested,
+      glossaryRequested,
+      glossaryName: glossaryName || "(empty)",
+      contents: body.contents,
+    });
+  }
+
+  let res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -515,7 +569,32 @@ async function translateWithGoogleV3(
     },
     body: JSON.stringify(body),
   });
-  const text = await res.text();
+  let text = await res.text();
+  let glossaryFallbackUsed = false;
+  if (
+    !res.ok &&
+    res.status === 404 &&
+    glossaryRequested &&
+    (text.includes("Glossary not found") || text.includes("Failed to initialize a glossary"))
+  ) {
+    console.warn("glossary missing -> fallback to free translate");
+    glossaryFallbackUsed = true;
+    const bodyWithoutGlossary: Record<string, unknown> = {
+      contents: body.contents,
+      mimeType: body.mimeType,
+      sourceLanguageCode: body.sourceLanguageCode,
+      targetLanguageCode: body.targetLanguageCode,
+    };
+    res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${accessToken}`,
+      },
+      body: JSON.stringify(bodyWithoutGlossary),
+    });
+    text = await res.text();
+  }
   if (!res.ok) throw new Error(`Google Translate v3 error ${res.status}: ${text}`);
   let decoded: {
     translations?: Array<{ translatedText?: string }>;
@@ -529,6 +608,17 @@ async function translateWithGoogleV3(
   } catch {
     throw new Error("Google Translate v3 returned non-JSON response.");
   }
+
+  if (debug95021) {
+    console.log("BFID95021 v3 response", {
+      keys: Object.keys(decoded || {}),
+      translationsLen: decoded?.translations?.length ?? 0,
+      glossaryTranslationsLen: decoded?.glossaryTranslations?.length ?? 0,
+      firstTranslation: decoded?.translations?.[0]?.translatedText,
+      firstGlossaryTranslation: decoded?.glossaryTranslations?.[0]?.translatedText,
+    });
+  }
+
   const baseTranslations = decoded?.translations;
   const glossaryTranslations = decoded?.glossaryTranslations;
   const glossaryUsed = Array.isArray(glossaryTranslations) && glossaryTranslations.length > 0;
@@ -541,12 +631,19 @@ async function translateWithGoogleV3(
   });
   for (let i = 0; i < out.length; i++) {
     out[i] = restoreProtection(out[i], allReplacements[i] || []);
+    out[i] = out[i] + (bfidSuffixes[i] ?? "");
   }
   for (const i of protectedFullTextIndices) {
     out[i] = (params.texts[i] ?? "").trim();
   }
   const protectionApplied = protectedFullTextIndices.length > 0 || allReplacements.some((r) => r.length > 0);
-  return { translated: out, protectionApplied, glossaryRequested, glossaryUsed };
+  return {
+    translated: out,
+    protectionApplied,
+    glossaryRequested,
+    glossaryUsed,
+    ...(glossaryFallbackUsed ? { glossaryFallbackUsed: true } : {}),
+  };
 }
 
 async function translateWithGoogleV2(
@@ -744,15 +841,18 @@ export default {
     let engine: "v2" | "v3" | undefined;
     let glossaryRequested = false;
     let glossaryUsed = false;
+    let glossaryFallbackUsed = false;
 
     async function runTranslate(protectedIndices: number[]): Promise<{
       translated: string[];
       protectionApplied: boolean;
       postProcessed: boolean;
       postProcessRulesApplied: string[];
+      localGlossaryAppliedIndices: number[];
     }> {
       let rawTranslated: string[];
       let protectionApplied: boolean;
+      let glossaryRequestedThisRun = false;
       if (useV3) {
         const result = await translateWithGoogleV3(
           { target: params.target, source: params.source ?? "en", texts: decodedTexts },
@@ -761,9 +861,11 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        glossaryRequestedThisRun = result.glossaryRequested;
         engine = "v3";
         glossaryRequested = glossaryRequested || result.glossaryRequested;
         glossaryUsed = glossaryUsed || result.glossaryUsed;
+        glossaryFallbackUsed = glossaryFallbackUsed || (result.glossaryFallbackUsed === true);
       } else {
         const result = await translateWithGoogleV2(
           { ...params, texts: decodedTexts },
@@ -774,12 +876,31 @@ export default {
         protectionApplied = result.protectionApplied;
         engine = "v2";
       }
+      const localAppliedIndices: number[] = [];
+      const glossaryActive =
+        useV3 &&
+        glossaryRequestedThisRun &&
+        (params.source ?? "en").trim().toLowerCase() === "en" &&
+        params.target.trim().toLowerCase() === "de";
+      if (glossaryActive) {
+        for (let i = 0; i < rawTranslated.length; i++) {
+          if (protectedIndices.includes(i)) continue;
+          const origClean = stripBFID(decodedTexts[i] ?? "").clean;
+          const transClean = stripBFID(rawTranslated[i] ?? "").clean;
+          if (origClean !== transClean) continue;
+          const localHit = applyLocalGlossaryFallbackOne(origClean);
+          if (localHit != null) {
+            rawTranslated[i] = localHit + stripBFID(decodedTexts[i] ?? "").suffix;
+            localAppliedIndices.push(i);
+          }
+        }
+      }
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", question);
       translated[0] = postResult.text;
       const postProcessed = (rawTranslated[0] ?? "") !== postResult.text;
       const postProcessRulesApplied = postResult.rulesApplied;
-      return { translated, protectionApplied, postProcessed, postProcessRulesApplied };
+      return { translated, protectionApplied, postProcessed, postProcessRulesApplied, localGlossaryAppliedIndices: localAppliedIndices };
     }
 
     /** v7.5: Run translate with custom texts (e.g. rewritten question). Only question may differ; answers unchanged. */
@@ -788,9 +909,11 @@ export default {
       protectionApplied: boolean;
       postProcessed: boolean;
       postProcessRulesApplied: string[];
+      localGlossaryAppliedIndices: number[];
     }> {
       let rawTranslated: string[];
       let protectionApplied: boolean;
+      let glossaryRequestedThisRun = false;
       if (useV3) {
         const result = await translateWithGoogleV3(
           { target: params.target, source: params.source ?? "en", texts },
@@ -799,9 +922,11 @@ export default {
         );
         rawTranslated = result.translated;
         protectionApplied = result.protectionApplied;
+        glossaryRequestedThisRun = result.glossaryRequested;
         engine = "v3";
         glossaryRequested = glossaryRequested || result.glossaryRequested;
         glossaryUsed = glossaryUsed || result.glossaryUsed;
+        glossaryFallbackUsed = glossaryFallbackUsed || (result.glossaryFallbackUsed === true);
       } else {
         const result = await translateWithGoogleV2(
           { target: params.target, source: params.source, texts },
@@ -812,12 +937,31 @@ export default {
         protectionApplied = result.protectionApplied;
         engine = "v2";
       }
+      const localAppliedIndices: number[] = [];
+      const glossaryActive =
+        useV3 &&
+        glossaryRequestedThisRun &&
+        (params.source ?? "en").trim().toLowerCase() === "en" &&
+        params.target.trim().toLowerCase() === "de";
+      if (glossaryActive) {
+        for (let i = 0; i < rawTranslated.length; i++) {
+          if (fullProtectedIndices.includes(i)) continue;
+          const origClean = stripBFID(texts[i] ?? "").clean;
+          const transClean = stripBFID(rawTranslated[i] ?? "").clean;
+          if (origClean !== transClean) continue;
+          const localHit = applyLocalGlossaryFallbackOne(origClean);
+          if (localHit != null) {
+            rawTranslated[i] = localHit + stripBFID(texts[i] ?? "").suffix;
+            localAppliedIndices.push(i);
+          }
+        }
+      }
       let translated = [...rawTranslated];
       const postResult = pack.postProcessQuestion(translated[0] ?? "", texts[0] ?? "");
       translated[0] = postResult.text;
       const postProcessed = (rawTranslated[0] ?? "") !== postResult.text;
       const postProcessRulesApplied = postResult.rulesApplied;
-      return { translated, protectionApplied, postProcessed, postProcessRulesApplied };
+      return { translated, protectionApplied, postProcessed, postProcessRulesApplied, localGlossaryAppliedIndices: localAppliedIndices };
     }
 
     // Optional per-day quota (best-effort, cache-based).
@@ -916,12 +1060,18 @@ export default {
       }
 
       let finalTranslated = translated;
+      let finalLocalGlossaryAppliedIndices = run.localGlossaryAppliedIndices ?? [];
       let finalValidationResult = validationResult;
       let finalProtectedIndices = [...protectedAnswerIndices];
       let retryReason: string | undefined;
 
       if (validationResult.level !== "bad" && pack.code === "de") {
-        const forceProtect = getForceProtectIndicesForProperNounMistranslation(decodedTexts, translated, protectedAnswerIndices);
+        const forceProtect = getForceProtectIndicesForProperNounMistranslation(
+          decodedTexts,
+          translated,
+          protectedAnswerIndices,
+          glossaryUsed
+        );
         if (forceProtect.length > 0 && debugLoggingEnabled) {
           logDebug(`v7.3.1 retry: proper_noun_translated, forceProtect=${JSON.stringify(forceProtect)}`);
         }
@@ -936,6 +1086,7 @@ export default {
             const validationResultRetry = pack.isBadTranslation(decodedTexts, translatedRetry, newProtected);
             if (validationResultRetry.level !== "bad") {
               finalTranslated = translatedRetry;
+              finalLocalGlossaryAppliedIndices = retryRun.localGlossaryAppliedIndices ?? [];
               finalValidationResult = validationResultRetry;
               finalProtectedIndices = newProtected;
               protectionApplied = retryRun.protectionApplied;
@@ -965,6 +1116,7 @@ export default {
               const validationRewrite = pack.isBadTranslation(decodedTexts, rewriteRun.translated, protectedAnswerIndices);
               if (validationRewrite.level === "good") {
                 finalTranslated = rewriteRun.translated;
+                finalLocalGlossaryAppliedIndices = rewriteRun.localGlossaryAppliedIndices ?? [];
                 finalValidationResult = validationRewrite;
                 protectionApplied = rewriteRun.protectionApplied;
                 postProcessed = rewriteRun.postProcessed;
@@ -983,6 +1135,114 @@ export default {
         }
       }
 
+      // When ONLY protection (no glossary) is active, do not treat too_many_unchanged_non_protected as bad (e.g. Curly terms).
+      // If a glossary is active, too_many_unchanged_non_protected should remain BAD so that existing retry mechanics can trigger.
+      const glossaryActive = glossaryRequested === true;
+      if (protectionApplied && !glossaryActive) {
+        const reasonsFiltered = finalValidationResult.reasons.filter((r) => r !== "too_many_unchanged_non_protected");
+        const badReasonsSet = new Set([
+          "length_mismatch",
+          "fewer_than_two_answers",
+          "empty_question",
+          "all_answers_empty",
+          "too_many_unchanged_non_protected",
+          "all_answers_unchanged",
+          "question_has_english_fragments",
+        ]);
+        const hasBad = reasonsFiltered.some((r) => badReasonsSet.has(r));
+        const level = hasBad ? "bad" : reasonsFiltered.length > 0 ? "fallback" : "good";
+        finalValidationResult = {
+          ...finalValidationResult,
+          reasons: reasonsFiltered,
+          level,
+        };
+      }
+
+      // v7.8: When glossary was requested and used, never allow unchanged (non-protected) — force glossary application.
+      const answerStartIdx = 1;
+      const protectedSetForGlossary = new Set(finalProtectedIndices);
+      if (glossaryRequested && glossaryUsed) {
+        const allowedSet = new Set(finalValidationResult.allowedUnchangedIndices);
+        const disallowedSet = new Set(finalValidationResult.disallowedUnchangedIndices);
+        for (let ai = 0; ai < decodedTexts.length - answerStartIdx; ai++) {
+          if (protectedSetForGlossary.has(ai)) continue;
+          const orig = (decodedTexts[answerStartIdx + ai] ?? "").trim();
+          const trans = (finalTranslated[answerStartIdx + ai] ?? "").trim();
+          if (orig === trans) {
+            allowedSet.delete(ai);
+            disallowedSet.add(ai);
+          }
+        }
+        const newAllowed = [...allowedSet];
+        const newDisallowed = [...disallowedSet];
+        finalValidationResult = {
+          ...finalValidationResult,
+          allowedUnchangedIndices: newAllowed,
+          disallowedUnchangedIndices: newDisallowed,
+        };
+        if (newDisallowed.length > 0) {
+          finalValidationResult = {
+            ...finalValidationResult,
+            level: "bad",
+            reasons: [...finalValidationResult.reasons, "glossary_unchanged_disallowed"],
+          };
+        }
+      }
+
+      // v7.8: One retry when glossary disallowed unchanged or too_many_unchanged_non_protected — re-translate (no rewrite), then re-apply glossary rule.
+      const glossaryRetryReasons = ["glossary_unchanged_disallowed", "too_many_unchanged_non_protected"];
+      const shouldGlossaryRetry =
+        glossaryRequested &&
+        glossaryUsed &&
+        finalValidationResult.level === "bad" &&
+        (finalValidationResult.disallowedUnchangedIndices.length > 0 ||
+          glossaryRetryReasons.some((r) => finalValidationResult.reasons.includes(r)));
+      if (shouldGlossaryRetry) {
+        retryAttempted = true;
+        const glossaryRetryFullIndices = finalProtectedIndices.map((ai) => ai + 1);
+        try {
+          const glossaryRetryRun = await runTranslate(glossaryRetryFullIndices);
+          const retryTranslated = glossaryRetryRun.translated;
+          if (!containsPlaceholder(retryTranslated)) {
+            const validationRetry = pack.isBadTranslation(decodedTexts, retryTranslated, finalProtectedIndices);
+            let retryAllowed = [...validationRetry.allowedUnchangedIndices];
+            let retryDisallowed = [...validationRetry.disallowedUnchangedIndices];
+            if (glossaryRequested && glossaryUsed) {
+              const retryAllowedSet = new Set(retryAllowed);
+              const retryDisallowedSet = new Set(retryDisallowed);
+              for (let ai = 0; ai < decodedTexts.length - answerStartIdx; ai++) {
+                if (protectedSetForGlossary.has(ai)) continue;
+                const orig = (decodedTexts[answerStartIdx + ai] ?? "").trim();
+                const trans = (retryTranslated[answerStartIdx + ai] ?? "").trim();
+                if (orig === trans) {
+                  retryAllowedSet.delete(ai);
+                  retryDisallowedSet.add(ai);
+                }
+              }
+              retryAllowed = [...retryAllowedSet];
+              retryDisallowed = [...retryDisallowedSet];
+            }
+            if (retryDisallowed.length < finalValidationResult.disallowedUnchangedIndices.length) {
+              finalTranslated = retryTranslated;
+              finalLocalGlossaryAppliedIndices = glossaryRetryRun.localGlossaryAppliedIndices ?? [];
+              finalValidationResult = {
+                ...validationRetry,
+                allowedUnchangedIndices: retryAllowed,
+                disallowedUnchangedIndices: retryDisallowed,
+                level: retryDisallowed.length > 0 ? "bad" : validationRetry.level,
+                reasons:
+                  retryDisallowed.length > 0
+                    ? [...validationRetry.reasons, "glossary_unchanged_disallowed"]
+                    : validationRetry.reasons,
+              };
+              if (debugLoggingEnabled) logDebug("v7.8 glossary retry: improved result");
+            }
+          }
+        } catch (e) {
+          if (debugLoggingEnabled) logDebug(`v7.8 glossary retry failed: ${(e as Error)?.message ?? String(e)}`);
+        }
+      }
+
       const numAnswers = Math.max(1, decodedTexts.length - 1);
       const allowed = finalValidationResult.allowedUnchangedIndices.length;
       const disallowed = finalValidationResult.disallowedUnchangedIndices.length;
@@ -995,6 +1255,10 @@ export default {
       if (finalValidationResult.level === "bad") {
         logDebug(`validation BAD: ${JSON.stringify(finalValidationResult.reasons)}`);
         logDebug("cache skipped (BAD)");
+        const glossaryRetryReasonsForMeta = ["glossary_unchanged_disallowed", "too_many_unchanged_non_protected"];
+        const retryAttemptedForBad =
+          retryAttempted ||
+          glossaryRetryReasonsForMeta.some((r) => finalValidationResult.reasons.includes(r));
         // v7.6: When bad_result due to question_has_english_fragments, use stumpf German rewrite so we never return mixed question.
         let badTranslated = decodedTexts;
         if (finalValidationResult.reasons.includes("question_has_english_fragments")) {
@@ -1028,12 +1292,14 @@ export default {
               htmlDecoded,
               containsPlaceholder: containsPlaceholder(finalTranslated),
               mixedLanguageDetected: finalValidationResult.reasons.includes("mixed_language_in_question"),
-              retryAttempted,
+              retryAttempted: retryAttemptedForBad,
               retryReason,
               rewriteApplied: false,
               protectedIndicesInitial: toGlobalProtectedIndices(protectedAnswerIndices),
               protectedIndicesFinal: toGlobalProtectedIndices(finalProtectedIndices),
               engineRequested: enginePref || "auto",
+              localGlossaryApplied: (finalLocalGlossaryAppliedIndices?.length ?? 0) > 0,
+              localGlossaryAppliedIndices: finalLocalGlossaryAppliedIndices ?? [],
             }),
           } satisfies TranslateBatchResponse,
           { status: 200 }
@@ -1084,7 +1350,7 @@ export default {
 
       let didStore = false;
       const effectiveValidationLevel = usedForcedRewrite ? "good" : finalValidationResult.level;
-      const effectiveFallbackUsed = usedForcedRewrite ? false : fallbackUsed;
+      const effectiveFallbackUsed = usedForcedRewrite ? false : fallbackUsed || glossaryFallbackUsed;
       const effectivePostProcessRulesApplied = forcedRewriteRule
         ? [...postProcessRulesApplied, forcedRewriteRule]
         : postProcessRulesApplied;
@@ -1120,6 +1386,8 @@ export default {
           engineRequested: enginePref || "auto",
           glossaryRequested,
           glossaryUsed,
+          localGlossaryApplied: (finalLocalGlossaryAppliedIndices?.length ?? 0) > 0,
+          localGlossaryAppliedIndices: finalLocalGlossaryAppliedIndices ?? [],
           quota: quotaMeta,
         };
         const cachePayload = {
@@ -1180,6 +1448,8 @@ export default {
           engineRequested: enginePref || "auto",
           glossaryRequested,
           glossaryUsed,
+          localGlossaryApplied: (finalLocalGlossaryAppliedIndices?.length ?? 0) > 0,
+          localGlossaryAppliedIndices: finalLocalGlossaryAppliedIndices ?? [],
           quota: quotaMeta,
         }),
       };
