@@ -57,3 +57,6 @@ app.*.map.json
 “lib/translation/”
 “translation-worker/”
 “n#translation-worker/
+
+# Local secrets
+translation-worker/.dev.vars
